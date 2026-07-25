@@ -1,0 +1,205 @@
+# lloc — LLM Localization
+
+Консольная утилита локализации приложений через **локальную LLM (Ollama)**.
+Читает базовые строки и контекст из TOML-конфигов, переводит только дельту,
+валидирует результат, следит за консистентностью терминологии и раскладывает
+переводы по форматам платформ (сейчас — Android `strings.xml`).
+
+- **Zero-install**: только стандартная библиотека Python, без pip и venv.
+- **Только дельта**: переводятся отсутствующие и устаревшие строки, удалённые
+  ключи вычищаются отовсюду автоматически.
+- **Git-friendly**: все состояния — текстовые файлы с детерминированным
+  порядком ключей, коммитятся.
+- **Монорепо**: workspace-режим с наследованием настроек, группами продуктов
+  и общим пулом воркеров.
+
+Детали дизайна и форматов — в [SPEC.md](SPEC.md).
+
+## Требования
+
+- **Python 3.11+** (нужен `tomllib`; других зависимостей нет);
+- **[Ollama](https://ollama.com)** локально — только для команд, которые
+  переводят (`translate`) или строят терм-карту (`verify --terms`);
+  `status`, `build`, `verify`, `import` работают без LLM. Модель по умолчанию
+  задана в конфиге (`[ollama] model`), при первом запуске подтягивается
+  автоматически.
+
+## Quickstart: одиночный проект
+
+Каталог локализации (обычно `myapp/l10n/`) содержит два файла, которые пишет
+человек:
+
+```toml
+# l10n.toml
+[app]
+description = "My TV app: IPTV player for Android TV"
+tone = "neutral, concise UI language; formal address"
+base_language = "en"
+languages = ["ru", "de", "ja"]
+
+[output]
+adapter = "android-xml"
+[output.android-xml]
+res_dir = "../app/src/main/res"   # пути — относительно l10n.toml
+```
+
+```toml
+# strings.toml — источник правды для всех строк
+[menu_search]
+text = "Search"
+context = "Main menu item"
+type = "button"
+```
+
+Дальше:
+
+```bash
+python lloc.py --dir myapp/l10n status       # что нужно перевести (без LLM)
+python lloc.py --dir myapp/l10n translate    # перевод дельты + build
+```
+
+Если строки уже живут в Android-проекте, `strings.toml` генерируется из
+базового `values/strings.xml`:
+
+```bash
+python lloc.py --dir myapp/l10n import --bootstrap-strings
+```
+
+Хранилище переводов — `locales/*.json` (пишет утилита, коммитится); XML в
+`res/` — генерируемый артефакт `build`.
+
+## Quickstart: workspace (монорепо)
+
+Всё workspace-уровневое живёт в одном каталоге `l10n/` в корне репозитория:
+
+```
+monorepo/
+├── l10n/
+│   ├── config.toml        # members + общие дефолты
+│   └── player.toml        # группа "player" (любой *.toml кроме config.toml)
+├── apps/tv/l10n.toml      # модульные конфиги — в каталогах модулей
+├── apps/mobile/l10n.toml
+└── libs/core/l10n.toml
+```
+
+```toml
+# l10n/config.toml
+members = ["apps/*", "libs/*"]   # явные глобы, без автосканирования
+
+[app]
+tone = "neutral, concise"
+base_language = "en"
+languages = ["ru", "de"]
+
+[ollama]
+workers = 3                      # общий пул на весь прогон
+```
+
+```toml
+# l10n/player.toml — контекст продуктовой группы (редактирует команда продукта)
+context = "TinyPlayer product family: IPTV player apps and a shared core."
+```
+
+```toml
+# apps/tv/l10n.toml — модуль: наследует дефолты, добавляет своё
+group = "player"
+
+[app]
+description = "TV variant; remote-control navigation."
+
+[output]
+adapter = "android-xml"
+[output.android-xml]
+res_dir = "res"
+```
+
+Запуск из корня обходит все модули агрегированно; `--dir <модуль>` ограничивает
+одним модулем (наследование и группа подхватываются автоматически):
+
+```bash
+python lloc.py --dir monorepo status                # все модули
+python lloc.py --dir monorepo translate             # общий пул воркеров
+python lloc.py --dir monorepo/apps/tv status        # один модуль
+```
+
+Группа — граница консистентности: few-shot примеры и терминология не
+пересекают её; `verify` предупреждает о дублях ключей внутри группы.
+Рабочий пример: [`examples/demo-workspace`](examples/demo-workspace)
+(одиночный: [`examples/demo`](examples/demo)).
+
+## Команды
+
+Общие опции: `--dir PATH` (каталог с `l10n.toml` или корень workspace,
+по умолчанию `.`), `--lang xx[,yy]` (фильтр языков), `--verbose`.
+
+| Команда | Действие | LLM |
+|---|---|---|
+| `status` | Таблица ok / missing / stale / orphan по языкам. Exit code 1, если есть работа. | нет |
+| `translate` | Перевод дельты (missing + stale), чистка удалённых ключей, обновление `locales/` и lock, затем автоматически `build`. Флаги: `--force` (перевести всё заново), `--limit N`, `--dry-run` (план без запросов), `--no-build`, `--model NAME` (A/B-прогон), `--fix-terms` (авто-исправление расхождений терминологии). | да |
+| `build` | Сгенерировать файлы платформы из `locales/`: `values/strings.xml` (база) + `values-b+xx/`. Особые ключи в существующих XML сохраняются. | нет |
+| `verify` | Валидации существующих переводов, консистентность lock/locales, эвристика расхождений терминов, дубли ключей в группе. `--terms` — точная LLM-терм-карта. | только `--terms` |
+| `import` | Пока реализован `--bootstrap-strings`: генерация `strings.toml` из базового `values/strings.xml` (`--overwrite` — перезаписать). Импорт готовых переводов — следующий этап. | нет |
+
+Примеры:
+
+```bash
+python lloc.py --dir l10n translate --dry-run          # оценить объём работы
+python lloc.py --dir l10n translate --lang ru,de       # только два языка
+python lloc.py --dir l10n translate --force --lang ja  # пере-перевести язык
+python lloc.py --dir l10n verify --terms               # аудит терминологии
+```
+
+`python -m lloc` эквивалентен `python lloc.py`.
+
+## Идемпотентность и прерывание
+
+Повторный запуск ничего не ломает и не делает лишней работы: переводится
+только дельта, хеши базовых текстов отслеживают устаревание. `translate`
+**пишет locale после каждого батча** — процесс можно прерывать (Ctrl+C,
+падение сети, перезагрузка) в любой момент: сделанное сохранено, следующий
+запуск продолжит с места остановки. Удаление ключа из `strings.toml`
+вычищает его при следующем `translate` отовсюду: из `locales/*.json`, lock,
+терм-кешей и (через build) из всех XML; особые ключи XML при этом не
+трогаются.
+
+## Правила для CLAUDE.md
+
+Готовый блок для `CLAUDE.md` репозитория, где используется lloc
+(путь в первой строке — плейсхолдер, поправьте под свой репо):
+
+```markdown
+## Локализация (lloc)
+
+Утилита: `../lloc/lloc.py` относительно корня репо.
+Запуск: `python <путь>/lloc.py --dir <каталог l10n> <команда>`.
+
+- **Источник правды — `strings.toml`** (+ `l10n.toml` конфиг). Сгенерированные
+  файлы руками НЕ редактировать: ни `locales/*.json`, ни `res/values*/strings.xml`,
+  ни `l10n.lock.json` — их пишет утилита, ручные правки будут перезаписаны.
+- Добавил/изменил строку в `strings.toml` → сразу заполни `context`
+  (и `type`: button / title / message) — от контекста напрямую зависит
+  качество перевода. Затем `status` — мгновенная оценка дельты без LLM.
+- `translate` инкрементален: обычный прогон после мелких правок — секунды или
+  минуты. Начальный перевод проекта или массовые операции (`--force`, новый
+  язык) — долгие: запускай их В ФОНЕ (фоновый bash / сабагент), не блокируя
+  основную работу. Это безопасно: утилита идемпотентна, сохраняет прогресс
+  после каждого батча и переживает прерывание — повторный запуск продолжит
+  с места остановки.
+- Оценить объём перед долгой операцией: `translate --dry-run`.
+- Перед релизом: `verify` (быстро, без LLM); глубокий аудит терминологии —
+  `verify --terms` (нужна Ollama).
+- Удаление ключа из `strings.toml` — это ВСЁ, что нужно для удаления строки:
+  следующий `translate` сам вычистит её из locales, lock, терм-кешей и XML.
+- Особые ключи Android (`translatable="false"`, `<string-array>`, `<plurals>`)
+  живут прямо в XML, утилитой не управляются и переживают `build` нетронутыми —
+  их редактируй в XML как обычно.
+- В монорепо с workspace-режимом (`l10n/config.toml` с `members`): команды из
+  корня обходят все модули; `--dir <модуль>` — один модуль. Терминология и
+  примеры переводов общие внутри группы модулей (`group = "..."`).
+```
+
+## Тесты
+
+```bash
+python -m unittest discover -s tests -t .
+```
