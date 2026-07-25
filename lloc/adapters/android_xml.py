@@ -15,6 +15,7 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from ..fsutil import atomic_write_text
 from .base import Adapter
 
 # raw text -> android resource text ('@'/'?' need escaping only at string start,
@@ -123,10 +124,14 @@ class AndroidXmlAdapter(Adapter):
             blocks.append("    " + ET.tostring(n, encoding="unicode"))
         return blocks
 
-    def export(self, locales: dict[str, dict[str, dict]]) -> list[str]:
+    def export(self, locales: dict[str, dict[str, dict]],
+               langs: list[str] | None = None) -> list[str]:
         base = {key: {"text": e.text} for key, e in self.project.strings.items()}
-        targets = [("values", base)] + [
-            (self.dir_for(lang), locales.get(lang, {})) for lang in self.project.languages]
+        if langs is None:
+            targets = [("values", base)] + [
+                (self.dir_for(lang), locales.get(lang, {})) for lang in self.project.languages]
+        else:  # incremental: selected languages only, base untouched
+            targets = [(self.dir_for(lang), locales.get(lang, {})) for lang in langs]
         written = []
         for dirname, entries in targets:
             out_dir = self.res_dir / dirname
@@ -140,7 +145,7 @@ class AndroidXmlAdapter(Adapter):
             lines.extend(preserved)
             lines.append("</resources>")
             out_dir.mkdir(parents=True, exist_ok=True)
-            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            atomic_write_text(path, "\n".join(lines) + "\n")
             written.append(str(path))
         return written
 

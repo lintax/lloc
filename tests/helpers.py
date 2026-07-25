@@ -83,11 +83,15 @@ class MockTransport:
 
     @staticmethod
     def _target_lang(payload: dict) -> str:
-        # prompt contains "to <lang>." per translate.txt template
+        # prompt contains "to <spelled-out name>." per translate.txt template;
+        # map the name back to the code so tests keep asserting on codes
+        from lloc.langnames import _FULL, _PRIMARY
+        names = {v: k for k, v in {**_PRIMARY, **_FULL}.items()}
         content = payload["messages"][0]["content"]
         for line in content.splitlines():
             if " to " in line and line.startswith("TASK:"):
-                return line.rsplit(" to ", 1)[1].rstrip(".")
+                name = line.rsplit(" to ", 1)[1].rstrip(".")
+                return names.get(name, name)
         return "xx"
 
     @staticmethod

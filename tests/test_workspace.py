@@ -264,12 +264,26 @@ class TestWorkspaceCli(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("not in any member", out)
 
-    def test_translate_dry_run_prefixes_modules(self):
+    def test_translate_dry_run_groups_languages_by_keyset(self):
         rc, out = self._run("translate", "--dry-run")
         self.assertEqual(rc, 0)
-        self.assertIn("[apps/tv:ru] 3 to translate", out)
-        self.assertIn("[libs/core:de] 1 to translate", out)
+        # languages with an identical pending keyset collapse into one line
+        self.assertIn("[apps/tv] all 3 keys → 2 languages (ru, de)", out)
+        self.assertIn("[libs/core] all 1 keys → 2 languages (ru, de)", out)
+        self.assertIn("[apps/mobile] all 1 keys → ru", out)
         self.assertIn("no requests made", out)
+
+    def test_translate_dry_run_partial_keysets_split_groups(self):
+        # de is fully translated except one key -> its own group; ru needs all
+        ws = load(self.tmp)
+        tv = member(ws, "apps/tv")
+        entries = {k: {"text": f"[de]{e.text}", "src": text_hash(e.text)}
+                   for k, e in tv.strings.items() if k != "tv_hello"}
+        save_locale(tv.root, "de", entries, list(tv.strings))
+        rc, out = self._run("translate", "--dry-run")
+        self.assertEqual(rc, 0)
+        self.assertIn("[apps/tv] all 3 keys → ru", out)
+        self.assertIn("[apps/tv] 1 key (tv_hello) → de", out)
 
     def test_import_requires_module_dir(self):
         rc, out = self._run("import", "--bootstrap-strings")

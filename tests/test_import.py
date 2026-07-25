@@ -47,7 +47,9 @@ class TestImportTranslations(unittest.TestCase):
         rc, out = self._run()
         self.assertEqual(rc, 0)
         ru = load_locale(self.tmp, "ru")
-        self.assertEqual(ru["menu_search"], {"text": "Поиск", "src": text_hash("Search")})
+        self.assertEqual(ru["menu_search"]["text"], "Поиск")
+        self.assertEqual(ru["menu_search"]["src"], text_hash("Search"))
+        self.assertEqual(ru["menu_search"]["model"], "imported")
         self.assertIn("playback_error", ru)
         # unknown, non-translatable and empty entries are skipped
         self.assertNotIn("legacy_key", ru)

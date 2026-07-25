@@ -127,7 +127,7 @@ def _load_strings(path: Path) -> dict[str, StringEntry]:
         text = val.get("text")
         if isinstance(text, dict):
             raise ConfigError(
-                f"{STRINGS_NAME}: [{key}]: plural tables are not supported yet; "
+                f"{STRINGS_NAME}: [{key}]: plurals are not supported by design; "
                 'rephrase the base text so the form does not depend on the number, e.g. "Items: %d" '
                 "(SPEC.md §12)"
             )

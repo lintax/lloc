@@ -10,8 +10,11 @@ class Adapter:
     def __init__(self, project: Project):
         self.project = project
 
-    def export(self, locales: dict[str, dict[str, dict]]) -> list[str]:
-        """Write platform files from the locale store. Returns list of written paths."""
+    def export(self, locales: dict[str, dict[str, dict]],
+               langs: list[str] | None = None) -> list[str]:
+        """Write platform files from the locale store. Returns list of written
+        paths. `langs` limits the write to the given languages (incremental
+        build after `set`); None = all languages + the base file."""
         raise NotImplementedError
 
     def import_(self) -> dict[str, dict[str, str]]:

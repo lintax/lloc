@@ -15,7 +15,9 @@ import re
 from dataclasses import dataclass
 
 from .config import Project
+from .fsutil import atomic_write_text
 from .hashes import text_hash
+from .langnames import language_name
 from .ollama import OllamaClient, string_schema
 from .store import base_hashes, load_locale, save_locale
 
@@ -238,8 +240,7 @@ def load_term_map(project: Project, lang: str) -> dict:
 def save_term_map(project: Project, lang: str, data: dict) -> None:
     p = term_map_path(project, lang)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                 encoding="utf-8")
+    atomic_write_text(p, json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
 def prune_term_maps(project: Project) -> None:
@@ -303,7 +304,8 @@ def build_term_map(project: Project, lang: str, locale: dict[str, dict],
                 f"key: {k}\nbase: {project.strings[k].text}\ntranslation: {locale[k]['text']}\n"
                 for k, _ in batch)
             prompt = render(template, term=term,
-                            base_language=project.base_language, target_language=lang,
+                            base_language=language_name(project.base_language),
+                            target_language=language_name(lang),
                             entries_block=entries_block)
             parsed, _ = client.chat([{"role": "user", "content": prompt}],
                                     string_schema([k for k, _ in batch]))
@@ -368,7 +370,7 @@ def _choose_variant(project: Project, lang: str, d: Divergence,
             f'{k}: "{project.strings[k].text}" ({project.strings[k].context})'
             for k in ks)
         for v, ks in d.variants.items())
-    prompt = render(template, term=d.term, target_language=lang,
+    prompt = render(template, term=d.term, target_language=language_name(lang),
                     app_context=project.full_context, variants_block=variants_block)
     schema = {"type": "object",
               "properties": {"variant": {"type": "string", "enum": list(d.variants)}},

@@ -8,8 +8,9 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-# printf-style placeholders (%s, %d, %1$s, %.2f, %%) and escape sequences.
-PLACEHOLDER_RE = re.compile(r"%(?:\d+\$)?(?:\.\d+)?[sdfxXeg]|%%")
+# printf-style placeholders (%s, %d, %1$s, %.2f, %%) incl. iOS %@ / %1$@,
+# and escape sequences.
+PLACEHOLDER_RE = re.compile(r"%(?:\d+\$)?(?:\.\d+)?[sdfxXeg@]|%%")
 ESCAPE_RE = re.compile(r"\n|\t")
 
 MIN_LENGTH_BASE = 10  # ratio check uses max(len(base), this) to avoid noise on tiny strings

@@ -4,6 +4,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .fsutil import atomic_write_text
+
 _BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -28,4 +30,4 @@ def write_strings_toml(path: Path, entries: dict[str, str]) -> None:
         lines.append(f"[{_toml_key(key)}]")
         lines.append(f"text = {toml_escape(text)}")
         lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))

@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
+from contextlib import ExitStack, nullcontext, suppress
 
 from .adapters import get_adapter
 from .config import ConfigError, Workspace, load
-from .engine import plan, run_translate, run_translate_jobs
+from .engine import TranslateInterrupted, manual_stale, plan, run_translate, run_translate_jobs
+from .fsutil import parse_duration, parse_when, utc_now_iso
+from .runlock import LockBusy, module_lock
 from .store import base_hashes, classify, load_locale, load_lock, save_lock
 
 
@@ -21,7 +25,8 @@ DEFAULTS = {
     "dir": ".", "lang": None, "verbose": False,
     "force": False, "limit": None, "dry_run": False, "no_build": False, "model": None,
     "assume_stale": False, "overwrite": False, "bootstrap_strings": False,
-    "fix_terms": False, "terms": False,
+    "fix_terms": False, "terms": False, "retranslate_model": None,
+    "last": False, "since": "24h", "force_set": False,
 }
 
 
@@ -41,6 +46,9 @@ def _translate_flags(p: argparse.ArgumentParser) -> None:
                    help="override the Ollama model from l10n.toml (for A/B runs)")
     p.add_argument("--fix-terms", action="store_true", default=_S,
                    help="fix terminology divergences via re-translation (SPEC.md §13.4)")
+    p.add_argument("--retranslate-model", default=_S, metavar="PATTERN",
+                   help="re-translate strings whose stored `model` matches this "
+                        "fnmatch pattern (e.g. 'gemma3*', 'imported', 'manual')")
 
 
 def _import_flags(p: argparse.ArgumentParser) -> None:
@@ -55,12 +63,20 @@ def _verify_flags(p: argparse.ArgumentParser) -> None:
                    help="build the LLM term map and report divergences (SPEC.md §13.3)")
 
 
+def _report_flags(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--last", action="store_true", default=_S,
+                   help="show recently translated strings (the default and only mode)")
+    p.add_argument("--since", default=_S, metavar="DURATION",
+                   help="time window for --last: 90m / 24h / 7d (default 24h)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="lloc", description="LLM localization tool (see SPEC.md)")
     _global_flags(p)
     _translate_flags(p)   # tolerate command flags before the subcommand too
     _import_flags(p)
     _verify_flags(p)
+    _report_flags(p)
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("status", help="show ok/missing/stale/orphan per language")
@@ -80,6 +96,17 @@ def build_parser() -> argparse.ArgumentParser:
     v = sub.add_parser("verify", help="validate existing translations (LLM only with --terms)")
     _global_flags(v)
     _verify_flags(v)
+
+    r = sub.add_parser("report", help="review recently translated strings")
+    _global_flags(r)
+    _report_flags(r)
+
+    st = sub.add_parser("set", help='manual fix: lloc set <key> --lang de "text"')
+    st.add_argument("key", help="string key from strings.toml")
+    st.add_argument("text", help="the corrected translation")
+    st.add_argument("--force-set", action="store_true", default=_S,
+                    help="accept the text even if placeholder/format validation fails")
+    _global_flags(st)
     return p
 
 
@@ -109,22 +136,48 @@ def cmd_status(project, args) -> int:
     return 1 if dirty else 0
 
 
+def _print_plan(work: dict[str, list[str]], total: int, mod: str = "") -> None:
+    """Dry-run plan, inverted: languages grouped by identical pending keysets
+    (map<keyset, languages>), largest keyset first. A real translate run
+    batches per language and may differ in order — the plan answers
+    "what changes", not "in which order"."""
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for lang, keys in work.items():
+        if keys:
+            groups.setdefault(tuple(keys), []).append(lang)
+    if not groups:
+        print(f"{mod}nothing to translate")
+        return
+    for keys, langs in sorted(groups.items(), key=lambda kv: (-len(kv[0]), kv[1])):
+        if len(keys) == total:
+            what = f"all {total} keys"
+        else:
+            shown = ", ".join(keys[:10]) + (", …" if len(keys) > 10 else "")
+            what = f"{len(keys)} key{'s' if len(keys) != 1 else ''} ({shown})"
+        if len(langs) == 1:
+            who = langs[0]
+        else:
+            shown = ", ".join(langs[:8]) + (", …" if len(langs) > 8 else "")
+            who = f"{len(langs)} languages ({shown})"
+        print(f"{mod}{what} → {who}")
+
+
 def cmd_translate(project, args) -> int:
     if args.model:
         project.ollama.model = args.model
     langs = _langs(project, args)
-    work = plan(project, langs, args.force, args.limit)
+    work = plan(project, langs, args.force, args.limit, args.retranslate_model)
     todo = {k: v for k, v in work.items() if v}
     if args.dry_run:
-        for lang, keys in work.items():
-            print(f"[{lang}] {len(keys)} to translate" + (f": {', '.join(keys[:10])}"
-                  + ("…" if len(keys) > 10 else "") if keys else ""))
+        _print_plan(work, total=len(project.strings))
         print(f"\nplan: {sum(len(v) for v in work.values())} translations, no requests made")
         return 0
     if not todo:
         print("nothing to translate")
+    stale_manual = manual_stale(project, langs)  # snapshot before the run
     started = time.monotonic()
-    results = run_translate(project, langs, force=args.force, limit=args.limit)
+    results = run_translate(project, langs, force=args.force, limit=args.limit,
+                            retranslate_model=args.retranslate_model)
     elapsed = time.monotonic() - started
 
     # lock: snapshot of current base hashes (only when no fatal errors);
@@ -145,6 +198,7 @@ def cmd_translate(project, args) -> int:
     for lang, fails in failed.items():
         for key, errors in fails.items():
             print(f"[{lang}] FAILED {key}: {'; '.join(errors)}")
+    _report_stale_manual(stale_manual, results)
 
     rc = 0
     if fatal or failed:
@@ -157,6 +211,20 @@ def cmd_translate(project, args) -> int:
         rc2 = cmd_build(project, args)
         rc = rc or rc2
     return rc
+
+
+def _report_stale_manual(stale_manual: dict, results, mod: str = "") -> None:
+    """The base text changed under these manual fixes — they went back to the
+    LLM. Flag them: the human curation is gone and may want a fresh look."""
+    by_lang = {r.lang: r for r in results}
+    for lang, keys in stale_manual.items():
+        r = by_lang.get(lang)
+        if r is None or r.error:
+            continue
+        done = [k for k in keys if k not in r.failed]
+        if done:
+            print(f"{mod}[{lang}] {len(done)} manual translation(s) were stale "
+                  f"and retranslated: {', '.join(done)}")
 
 
 def _run_fix_terms(project, langs) -> int:
@@ -312,7 +380,8 @@ def _import_translations(project, args) -> int:
                 kept += 1
                 continue
             src = "imported-stale" if args.assume_stale else current[key]
-            locale[key] = {"text": text, "src": src}
+            locale[key] = {"text": text, "src": src,
+                           "model": "imported", "translated_at": utc_now_iso()}
             new += 1
         if new:
             save_locale(project.root, lang, locale, order)
@@ -329,6 +398,88 @@ def _import_translations(project, args) -> int:
     print(f"{mod}import: {totals['imported']} imported, {totals['kept']} kept, "
           f"{totals['skipped']} skipped (unknown/empty)")
     return 0
+
+
+def cmd_set(project, args) -> int:
+    """Manual fix: write one translation into locales/ with model="manual"
+    (protected from --force / --retranslate-model), then incrementally build
+    that language. The canonical answer to "this translation is bad"."""
+    from .store import save_locale
+    from .validate import check_translation
+
+    if args.key not in project.strings:
+        raise ConfigError(f"set: unknown key {args.key!r} (not in strings.toml)")
+    if not args.lang:
+        raise ConfigError('set: --lang is required, e.g. set greeting --lang de "Hallo"')
+    lang = args.lang.strip()
+    if "," in lang:
+        raise ConfigError("set: exactly one language per call")
+    if lang not in project.languages:
+        raise ConfigError(f"set: language {lang!r} not in [app].languages")
+
+    base = project.strings[args.key].text
+    adapter = get_adapter(project)
+    errors = check_translation(base, args.text, project.length_ratio) \
+        + adapter.check(args.text)
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        if not args.force_set:
+            print("use --force-set to accept the text anyway", file=sys.stderr)
+            return 1
+        print("accepted despite validation errors (--force-set)", file=sys.stderr)
+
+    locale = load_locale(project.root, lang)
+    locale[args.key] = {"text": args.text, "src": base_hashes(project)[args.key],
+                        "model": "manual", "translated_at": utc_now_iso()}
+    save_locale(project.root, lang, locale, list(project.strings))
+    written = adapter.export({lang: locale}, langs=[lang])
+    mod = f"[{project.module}] " if project.module else ""
+    print(f'{mod}set [{lang}] {args.key} = "{args.text}" (manual), '
+          f"rebuilt {len(written)} file(s)")
+    return 0
+
+
+def cmd_report(project, args) -> int:
+    """Review pass: strings translated within the --since window (default 24h),
+    based on the `translated_at` stamp of locale entries. No LLM, no writes."""
+    from datetime import datetime, timezone
+
+    try:
+        window = parse_duration(args.since)
+    except ValueError as e:
+        raise ConfigError(str(e)) from e
+    cutoff = datetime.now(timezone.utc) - window
+    mod = f"[{project.module}] " if project.module else ""
+    total = 0
+    for lang in _langs(project, args):
+        locale = load_locale(project.root, lang)
+        rows = [(key, e) for key in project.strings
+                if (e := locale.get(key)) and (when := parse_when(e.get("translated_at", "")))
+                and when >= cutoff]
+        if not rows:
+            continue
+        total += len(rows)
+        print(f"{mod}[{lang}] {len(rows)} translated in the last {args.since}:")
+        for key, e in rows:
+            print(f'  {key}: "{e["text"]}" ({e.get("model", "?")}, {e["translated_at"]})')
+    print(f"{mod}report: {total} strings in the last {args.since}")
+    return 0
+
+
+# --- run lock (one mutating run per module) -------------------------------
+
+def _needs_lock(args) -> bool:
+    """Mutating commands hold the per-module run lock; `verify --terms`
+    writes term caches, so it counts too."""
+    return args.command in ("translate", "build", "import", "set") \
+        or (args.command == "verify" and args.terms)
+
+
+def _lock_ctx(project, args):
+    if not _needs_lock(args):
+        return nullcontext()
+    return module_lock(project.root, label=project.module or str(project.root))
 
 
 # --- workspace mode (SPEC.md §14) ----------------------------------------
@@ -358,22 +509,22 @@ def cmd_translate_workspace(ws: Workspace, args) -> int:
     for m in ws.members:
         if args.model:
             m.ollama.model = args.model
-        work = plan(m, _member_langs(m, args), args.force, args.limit)
+        work = plan(m, _member_langs(m, args), args.force, args.limit,
+                    args.retranslate_model)
         module_work.append((m, work))
         jobs += [(m, lang, keys) for lang, keys in work.items() if keys]
 
     if args.dry_run:
         for m, work in module_work:
-            for lang, keys in work.items():
-                print(f"[{m.module}:{lang}] {len(keys)} to translate"
-                      + (f": {', '.join(keys[:10])}" + ("…" if len(keys) > 10 else "")
-                         if keys else ""))
+            _print_plan(work, total=len(m.strings), mod=f"[{m.module}] ")
         total = sum(len(k) for _, w in module_work for k in w.values())
         print(f"\nplan: {total} translations, no requests made")
         return 0
 
     if not jobs:
         print("nothing to translate")
+    stale_by_module = {m.module: manual_stale(m, [lang for lang in work])
+                       for m, work in module_work}  # snapshot before the run
     started = time.monotonic()
     results = run_translate_jobs(jobs, ws.workers)  # one shared pool for the run
     elapsed = time.monotonic() - started
@@ -397,6 +548,7 @@ def cmd_translate_workspace(ws: Workspace, args) -> int:
             for key, errors in r.failed.items():
                 print(f"[{m.module}:{r.lang}] FAILED {key}: {'; '.join(errors)}")
                 rc = 1
+        _report_stale_manual(stale_by_module.get(m.module, {}), rs, mod=f"[{m.module}] ")
 
     if args.fix_terms:
         for m, work in module_work:
@@ -411,12 +563,16 @@ def cmd_translate_workspace(ws: Workspace, args) -> int:
 
 
 def run_workspace(ws: Workspace, args) -> int:
-    if args.command == "import":
-        print("import runs per module in a workspace: use --dir <member>", file=sys.stderr)
+    if args.command in ("import", "set"):
+        print(f"{args.command} runs per module in a workspace: use --dir <member>",
+              file=sys.stderr)
         return 2
     _check_workspace_langs(ws, args)
     if args.command == "translate":
-        return cmd_translate_workspace(ws, args)
+        with ExitStack() as stack:  # one run touches every member: lock them all
+            for m in ws.members:
+                stack.enter_context(_lock_ctx(m, args))
+            return cmd_translate_workspace(ws, args)
     rc = 0
     for m in ws.members:
         sub = argparse.Namespace(**vars(args))
@@ -425,7 +581,8 @@ def run_workspace(ws: Workspace, args) -> int:
             continue  # --lang selected languages this member does not have
         sub.lang = ",".join(langs) if args.lang else None
         print(f"\n=== {m.module} (group: {m.group}) ===")
-        rc = max(rc, COMMANDS[args.command](m, sub))
+        with _lock_ctx(m, args):
+            rc = max(rc, COMMANDS[args.command](m, sub))
     return rc
 
 
@@ -435,10 +592,16 @@ COMMANDS = {
     "build": cmd_build,
     "verify": cmd_verify,
     "import": cmd_import,
+    "report": cmd_report,
+    "set": cmd_set,
 }
 
 
 def main(argv: list[str] | None = None) -> int:
+    if os.name == "nt":  # pragma: no cover - Windows console may not be UTF-8
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args(argv)
     for key, value in DEFAULTS.items():  # fill flags suppressed in both positions
         if not hasattr(args, key):
@@ -449,10 +612,34 @@ def main(argv: list[str] | None = None) -> int:
         loaded = load(args.dir, require_strings=require)
         if isinstance(loaded, Workspace):
             return run_workspace(loaded, args)
-        return COMMANDS[args.command](loaded, args)
+        with _lock_ctx(loaded, args):
+            return COMMANDS[args.command](loaded, args)
+    except (TranslateInterrupted, KeyboardInterrupt):
+        # the lock is already released: the exception unwound _lock_ctx, and
+        # the OS drops the flock on process death anyway
+        return _interrupted()
+    except LockBusy as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 3
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+
+
+def _interrupted() -> int:
+    """Ctrl+C: report, flush and leave NOW — worker threads may be stuck in
+    long HTTP requests and must not keep the process alive (they are killed
+    by os._exit; completed batches are already saved). A second Ctrl+C during
+    this handler exits just as immediately via the signal override."""
+    import signal
+    with suppress(Exception):
+        signal.signal(signal.SIGINT, lambda *_: os._exit(130))
+    print("\ninterrupted — progress saved, rerun to continue", file=sys.stderr)
+    with suppress(Exception):
+        sys.stdout.flush()
+        sys.stderr.flush()
+    os._exit(130)
+    return 130  # unreachable; keeps the mocked-os._exit test path sane
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Project
+from .fsutil import atomic_write_text
 from .hashes import text_hash
 
 LOCK_NAME = "l10n.lock.json"
@@ -33,9 +34,7 @@ def load_lock(root: Path) -> dict[str, str]:
 
 def save_lock(root: Path, keys: dict[str, str]) -> None:
     payload = {"version": 1, "keys": keys}
-    lock_path(root).write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    atomic_write_text(lock_path(root), json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 # --- locale store -------------------------------------------------------
@@ -60,7 +59,7 @@ def save_locale(root: Path, lang: str, entries: dict[str, dict], order: list[str
     payload = {"version": 1, "language": lang, "strings": ordered}
     p = locale_path(root, lang)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(p, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 # --- classification -----------------------------------------------------

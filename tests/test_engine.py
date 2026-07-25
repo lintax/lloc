@@ -169,7 +169,7 @@ class TestCli(unittest.TestCase):
         make_project(tmp)
         seen = {}
 
-        def fake_run_translate(project, langs, force=False, limit=None, transport=None):
+        def fake_run_translate(project, langs, force=False, limit=None, transport=None, **kw):
             seen["model"] = project.ollama.model
             return [LangResult(lang=lang, translated=3) for lang in langs]
 

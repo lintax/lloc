@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from .config import Project, StringEntry
+from .langnames import language_name
 
 DEFAULT_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _WORD_RE = re.compile(r"[A-Za-zÀ-ɏЀ-ӿ]{3,}")
@@ -81,6 +82,8 @@ def select_examples(
             shared_terms = len(terms_mod.text_terms(project, base_text) & batch_terms)
             score = shared_terms * 10 + len(_words(base_text) & batch_words)
             if score > 0:
+                if entry.get("model") == "manual":
+                    score += 1000  # golden examples: manual fixes outrank the rest
                 scored.append((score, base_text, entry["text"]))
 
     scored: list[tuple[int, str, str]] = []
@@ -114,8 +117,8 @@ def build_translate_prompt(
         # layered context (SPEC.md §14): group context -> module description
         app_context=project.full_context,
         tone=project.tone or "neutral",
-        base_language=project.base_language,
-        target_language=lang,
+        base_language=language_name(project.base_language),
+        target_language=language_name(lang),
         glossary_block=glossary_block(project, lang),
         examples_block=examples,
         strings_block=strings_block(batch),
