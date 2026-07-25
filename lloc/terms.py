@@ -114,6 +114,19 @@ def _group_docs(project: Project):
             yield f"{sib.module}::{key}", e, False
 
 
+# Minimal English function words: articles, prepositions, conjunctions,
+# pronouns, auxiliaries and a few adverbs that carry no terminology. Words
+# under 3 letters are filtered earlier and are not listed.
+_EN_STOPWORDS = frozenset("""
+    the and for with from your you our they them their this that these those
+    are was were been being will would can could should may might must have
+    has had does did not all any some each every more most other another
+    into over under again while where when what which who whom whose then
+    than also just only very much many such off out about after before
+    during between through against
+""".split())
+
+
 def extract_terms(project: Project) -> dict[str, list[str]]:
     """{term: [keys of *own* base strings containing it]}, deterministic order.
     Occurrence counting spans the whole group; the key lists stay module-local
@@ -133,6 +146,11 @@ def extract_terms(project: Project) -> dict[str, list[str]]:
     gwords = _glossary_words(project)
     stop = {w for w, ks in occ.items()
             if len(ks) > max(total * cfg.stopword_df, STOPWORD_MIN)} - gwords
+    if project.base_language.split("-")[0] == "en":
+        # DF alone misses function words in small/medium corpora (live case:
+        # hundreds of "possibly divergent" warnings for the/and/you/with/off);
+        # a minimal built-in stop list for an English base plugs that hole
+        stop |= _EN_STOPWORDS - gwords
 
     merged: dict[str, set[str]] = {}
     merged_own: dict[str, set[str]] = {}
@@ -172,7 +190,7 @@ def extract_terms(project: Project) -> dict[str, list[str]]:
 def get_terms(project: Project) -> dict[str, list[str]]:
     cache = getattr(project, "_terms_cache", None)
     if cache is None:
-        cache = extract_terms(project) if project.terms.enabled else {}
+        cache = extract_terms(project)
         project._terms_cache = cache
     return cache
 
@@ -203,7 +221,7 @@ def text_terms(project: Project, text: str) -> set[str]:
 
 def heuristic_divergences(project: Project, lang: str, locale: dict[str, dict]) -> list[str]:
     """Warning strings; empty for non-space-segmented target languages."""
-    if not project.terms.enabled or lang.split("-")[0] in NON_SEGMENTED_PRIMARY:
+    if lang.split("-")[0] in NON_SEGMENTED_PRIMARY:
         return []
     current = base_hashes(project)
     warnings = []
@@ -404,7 +422,7 @@ def fix_language(project: Project, lang: str, client: OllamaClient) -> dict:
         note = (f'TERMINOLOGY: in this app "{d.term}" is translated as "{chosen}" '
                 f'(approved examples: {examples}). Use this translation unless '
                 f"this string's context demands otherwise.")
-        accepted, failed = translate_batch(project, client, lang, minority, locale,
+        accepted, failed, _arb = translate_batch(project, client, lang, minority, locale,
                                            extra_note=note)
         for k, text in accepted.items():
             locale[k] = {"text": text, "src": text_hash(project.strings[k].text)}

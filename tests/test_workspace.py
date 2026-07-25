@@ -19,6 +19,10 @@ tone = "neutral, concise"
 base_language = "en"
 languages = ["ru", "de"]
 
+[validation]
+semantic = "off"   # tests use a dumb mock transport; see helpers.L10N_TOML
+script_check = false
+
 [ollama]
 batch_size = 3
 workers = 2
@@ -210,9 +214,11 @@ class TestGroupBoundaries(unittest.TestCase):
     def test_fewshot_from_sibling_locale(self):
         from lloc.prompts import select_examples
         core = member(self.ws, "libs/core")
+        # trusted-only pool (SPEC §13.6): the sibling's entry must be trusted
         save_locale(core.root, "ru",
                     {"core_lock": {"text": "Канал заблокирован",
-                                   "src": text_hash("Channel is locked")}},
+                                   "src": text_hash("Channel is locked"),
+                                   "model": "imported"}},
                     ["core_lock"])
         tv = member(self.ws, "apps/tv")
         examples = select_examples(tv, [tv.strings["channel_open"]], {}, lang="ru")

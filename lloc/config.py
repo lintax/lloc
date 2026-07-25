@@ -31,11 +31,16 @@ STRINGS_NAME = "strings.toml"
 WORKSPACE_DIR = "l10n"                    # monorepo root: l10n/config.toml + l10n/<tag>.toml
 WORKSPACE_CONFIG = "config.toml"
 # sections whose keys a module inherits from workspace defaults (member wins per key)
-INHERITED_SECTIONS = ("app", "ollama", "terms", "validation", "glossary")
+INHERITED_SECTIONS = ("app", "ollama", "terms", "validation", "glossary", "models")
 
 
 class ConfigError(Exception):
     pass
+
+
+def _is_cloud_tag(model: str) -> bool:
+    """Ollama Cloud tags: 'qwen3.5:397b-cloud', 'deepseek-v4-flash:cloud'."""
+    return model.endswith("-cloud") or model.endswith(":cloud")
 
 
 @dataclass
@@ -60,7 +65,6 @@ class OllamaConfig:
 
 @dataclass
 class TermsConfig:
-    enabled: bool = True
     min_occurrences: int = 3          # single words: in >= N distinct strings
     min_bigram_occurrences: int = 2
     stopword_df: float = 0.35         # document frequency above which a word is functional
@@ -86,6 +90,58 @@ class Project:
     adapter_name: str = ""
     adapter_config: dict = field(default_factory=dict)
     length_ratio: float = DEFAULT_LENGTH_RATIO
+    latin_token_max: int = 5          # [validation]: script-mix heuristic (SPEC.md §7)
+    latin_allowlist: list[str] = field(default_factory=list)
+    script_check: bool = True         # [validation]: reject wrong-script candidates
+                                      # (false = escape hatch for pseudo-localization)
+    models: dict[str, str] = field(default_factory=dict)  # [models]: per-language override
+    semantic_mode: str = "batch"      # [validation].semantic: "batch" (default) | "off"
+    semantic_model: str | None = None  # [validation].semantic_model: separate judge model
+    judge_mode: str = "auto"          # [validation].semantic_mode: auto | inline | phased
+    ensemble_model: str | None = None  # [validation].ensemble_model: second translator
+    ensemble_concurrency: str = "auto"  # [validation].ensemble_concurrency: auto|batch|phased
+
+    @property
+    def semantic_inline_judge(self) -> bool:
+        """Concurrent inline judge: a separate (small) judge model runs in
+        parallel with the main model. Explicit opt-in ('inline') — "auto"
+        never risks VRAM by loading two models. Ensemble mode supersedes."""
+        return (self.semantic_mode == "batch" and bool(self.semantic_model)
+                and self.judge_mode == "inline" and not self.ensemble_model)
+
+    @property
+    def semantic_phased(self) -> bool:
+        """Phased judge flow (translate all -> swap to judge -> fix): the safe
+        default whenever a judge model is configured ("auto" or "phased").
+        Ensemble mode supersedes — it has its own arbitration phase."""
+        return (self.semantic_mode == "batch" and bool(self.semantic_model)
+                and self.judge_mode in ("auto", "phased") and not self.ensemble_model)
+
+    @property
+    def ensemble(self) -> bool:
+        """Ensemble mode: every string is translated by TWO models with a
+        meaning-only arbitration (SPEC.md §13.7)."""
+        return self.semantic_mode == "batch" and bool(self.ensemble_model)
+
+    @property
+    def ensemble_judge(self) -> str:
+        """The arbiter of ensemble phase C: [validation].semantic_model if
+        set, else the second translator itself."""
+        return self.semantic_model or self.ensemble_model or self.ollama.model
+
+    @property
+    def ensemble_batch(self) -> bool:
+        """Concurrent per-batch ensemble (SPEC.md §13.7): A and B translate
+        the same batch in parallel, the judge follows immediately. Explicit
+        "batch" turns it on; "auto" enables it only when ALL THREE models are
+        cloud tags (no VRAM, no swaps — the phases were a swap-era artifact).
+        Note: "auto" inspects the three configured models, not [models] pins."""
+        if not self.ensemble or self.ensemble_concurrency == "phased":
+            return False
+        if self.ensemble_concurrency == "batch":
+            return True
+        return all(_is_cloud_tag(m) for m in
+                   (self.ollama.model, self.ensemble_model or "", self.ensemble_judge))
     terms: TermsConfig = field(default_factory=TermsConfig)
     strings: dict[str, StringEntry] = field(default_factory=dict)  # insertion-ordered
     # workspace mode (SPEC.md §14); empty/defaults in single-project mode
@@ -184,14 +240,51 @@ def _build_project(root: Path, cfg: dict, require_strings: bool = True) -> Proje
 
     validation = cfg.get("validation", {})
     length_ratio = float(validation.get("length_ratio", DEFAULT_LENGTH_RATIO))
+    latin_token_max = int(validation.get("latin_token_max", 5))
+    latin_allowlist = [str(x) for x in validation.get("latin_allowlist", [])]
+    script_check = bool(validation.get("script_check", True))
+    semantic_mode = str(validation.get("semantic", "batch"))
+    if semantic_mode not in ("batch", "off"):
+        raise ConfigError(f'{CONFIG_NAME}: [validation].semantic must be "batch" or "off", '
+                          f"got {semantic_mode!r}")
+    semantic_model = validation.get("semantic_model")
+    if semantic_model is not None and (not isinstance(semantic_model, str) or not semantic_model):
+        raise ConfigError(f"{CONFIG_NAME}: [validation].semantic_model must be a model name")
+    judge_mode = str(validation.get("semantic_mode", "auto"))
+    if judge_mode not in ("auto", "inline", "phased"):
+        raise ConfigError(f'{CONFIG_NAME}: [validation].semantic_mode must be '
+                          f'"auto", "inline" or "phased", got {judge_mode!r}')
+    ensemble_model = validation.get("ensemble_model")
+    if ensemble_model is not None:
+        if not isinstance(ensemble_model, str) or not ensemble_model:
+            raise ConfigError(f"{CONFIG_NAME}: [validation].ensemble_model "
+                              "must be a model name")
+        if semantic_mode == "off":
+            raise ConfigError(f"{CONFIG_NAME}: [validation].ensemble_model requires "
+                              'semantic = "batch" (ensemble is a semantic-QA mode)')
+    ensemble_concurrency = str(validation.get("ensemble_concurrency", "auto"))
+    if ensemble_concurrency not in ("auto", "batch", "phased"):
+        raise ConfigError(f'{CONFIG_NAME}: [validation].ensemble_concurrency must be '
+                          f'"auto", "batch" or "phased", got {ensemble_concurrency!r}')
 
     t = cfg.get("terms", {})
+    if "enabled" in t:
+        raise ConfigError(
+            f"{CONFIG_NAME}: [terms].enabled was removed — the term system is "
+            "always on (decision record: SPEC.md §13.6); delete the key")
     terms = TermsConfig(
-        enabled=bool(t.get("enabled", True)),
         min_occurrences=int(t.get("min_occurrences", 3)),
         min_bigram_occurrences=int(t.get("min_bigram_occurrences", 2)),
         stopword_df=float(t.get("stopword_df", 0.35)),
     )
+
+    models = cfg.get("models", {})
+    for mlang, mname in models.items():
+        if not isinstance(mname, str) or not mname:
+            raise ConfigError(f"{CONFIG_NAME}: [models].{mlang} must be a model name")
+        if mlang not in languages:
+            raise ConfigError(f"{CONFIG_NAME}: [models].{mlang}: "
+                              f"language not in [app].languages")
 
     strings_path = root / STRINGS_NAME
     if require_strings or strings_path.is_file():
@@ -207,9 +300,18 @@ def _build_project(root: Path, cfg: dict, require_strings: bool = True) -> Proje
         languages=list(languages),
         glossary=glossary,
         ollama=ollama,
+        models={k: str(v) for k, v in models.items()},
         adapter_name=str(adapter_name),
         adapter_config=adapter_config,
         length_ratio=length_ratio,
+        latin_token_max=latin_token_max,
+        latin_allowlist=latin_allowlist,
+        script_check=script_check,
+        semantic_mode=semantic_mode,
+        semantic_model=semantic_model,
+        judge_mode=judge_mode,
+        ensemble_model=ensemble_model,
+        ensemble_concurrency=ensemble_concurrency,
         terms=terms,
         strings=strings,
     )

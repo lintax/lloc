@@ -83,7 +83,7 @@ class TestRetryOnBadResponse(unittest.TestCase):
     def test_empty_reply_retried_then_ok(self):
         transport = FlakyTransport(empty_times=1)
         client = OllamaClient(self.project.ollama, transport=transport)
-        accepted, failed = translate_batch(
+        accepted, failed, _arb = translate_batch(
             self.project, client, "ru", list(self.project.strings), {})
         self.assertEqual(failed, {})
         self.assertEqual(len(accepted), 3)

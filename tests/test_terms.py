@@ -84,18 +84,15 @@ class TestExtraction(unittest.TestCase):
         self.assertIn("live stream", text_terms(self.project, "a live stream plays"))
         self.assertEqual(text_terms(self.project, "Nothing relevant"), set())
 
-    def test_disabled(self):
-        self.project.terms.enabled = False
-        self.assertEqual(text_terms(self.project, "channel"), set())
-
     def test_fewshot_prefers_term_examples(self):
         from lloc.config import StringEntry
         from lloc.prompts import select_examples
+        # the few-shot pool is trusted-only (SPEC §13.6): mark entries manual
         locale = {
             # term-sharing example (channel)
-            "channel_list": {"text": "Все каналы", "src": "x"},
+            "channel_list": {"text": "Все каналы", "src": "x", "model": "manual"},
             # word-overlap only ("open" not a term)
-            "stream_start": {"text": "Запуск", "src": "x"},
+            "stream_start": {"text": "Запуск", "src": "x", "model": "manual"},
         }
         batch = [StringEntry(key="new_key", text="Lock the channel now")]
         self.project.strings["new_key"] = StringEntry(key="new_key", text="Lock the channel now")

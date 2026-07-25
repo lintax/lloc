@@ -11,8 +11,25 @@ from __future__ import annotations
 # legacy / grandfathered codes -> BCP-47
 _ALIASES = {"in": "id", "iw": "he", "ji": "yi", "tl": "fil"}
 
-# full-code overrides where plain composition reads unnaturally
+# full-code overrides where plain composition reads unnaturally, PLUS
+# script disambiguation for languages with ambiguous real-world practice:
+# LLMs default to the "wrong" script easily (live case: both cloud models
+# wrote Serbian in Latin). The prompt name pins the CLDR-default script,
+# consistent with expected_scripts() below.
 _FULL = {
+    # sr: user decision (июль 2026) — Latin is the more common practice for
+    # this audience, overriding the CLDR default (Cyrillic). sr-Cyrl subtag
+    # still available for the opposite choice.
+    "sr": "Serbian (Latin script)",
+    "bs": "Bosnian (Latin script)",
+    "kk": "Kazakh (Cyrillic script)",
+    "ky": "Kyrgyz (Cyrillic script)",
+    "mn": "Mongolian (Cyrillic script)",
+    "uz": "Uzbek (Latin script)",
+    "az": "Azerbaijani (Latin script)",
+    "pa": "Punjabi (Gurmukhi script)",
+    "ms": "Malay (Latin script)",
+    "ha": "Hausa (Latin script)",
     "es-419": "Latin American Spanish",
     "pt-BR": "Brazilian Portuguese",
     "pt-PT": "European Portuguese",
@@ -60,6 +77,60 @@ _SCRIPTS = {"Latn": "Latin script", "Cyrl": "Cyrillic script", "Arab": "Arabic s
 _REGIONS = {"419": "Latin America", "BR": "Brazil", "PT": "Portugal", "US": "USA",
             "GB": "UK", "CA": "Canada", "TW": "Taiwan", "HK": "Hong Kong",
             "IN": "India", "MX": "Mexico", "AR": "Argentina", "AU": "Australia"}
+
+
+# Expected Unicode script(s) per primary subtag — first word of the
+# unicodedata.name() of a letter ("LATIN SMALL LETTER A" -> "LATIN").
+# Languages not listed default to LATIN. Script subtags (-Latn/-Cyrl/-Arab)
+# override. Used by the script-mix heuristic in `verify` (validate.script_mix).
+_CYRILLIC = frozenset({"CYRILLIC"})
+_ARABIC = frozenset({"ARABIC"})
+_DEVANAGARI = frozenset({"DEVANAGARI"})
+_SCRIPTS_BY_LANG: dict[str, frozenset[str]] = {
+    "ru": _CYRILLIC, "uk": _CYRILLIC, "be": _CYRILLIC, "bg": _CYRILLIC,
+    "kk": _CYRILLIC, "ky": _CYRILLIC, "mk": _CYRILLIC, "mn": _CYRILLIC,
+    # sr intentionally NOT mapped to Cyrillic: project decision is Latin
+    # (default LATIN applies); use "sr-Cyrl" in [app].languages to flip.
+    "ar": _ARABIC, "fa": _ARABIC, "ur": _ARABIC,
+    "he": frozenset({"HEBREW"}), "yi": frozenset({"HEBREW"}),
+    "el": frozenset({"GREEK"}),
+    "hy": frozenset({"ARMENIAN"}),
+    "ka": frozenset({"GEORGIAN"}),
+    "am": frozenset({"ETHIOPIC"}),
+    "my": frozenset({"MYANMAR"}),
+    "km": frozenset({"KHMER"}),
+    "lo": frozenset({"LAO"}),
+    "th": frozenset({"THAI"}),
+    "si": frozenset({"SINHALA"}),
+    "ta": frozenset({"TAMIL"}),
+    "te": frozenset({"TELUGU"}),
+    "kn": frozenset({"KANNADA"}),
+    "ml": frozenset({"MALAYALAM"}),
+    "gu": frozenset({"GUJARATI"}),
+    "pa": frozenset({"GURMUKHI"}),
+    "bn": frozenset({"BENGALI"}), "as": frozenset({"BENGALI"}),
+    "hi": _DEVANAGARI, "mr": _DEVANAGARI, "ne": _DEVANAGARI,
+    "or": frozenset({"ORIYA"}),
+    "ja": frozenset({"CJK", "HIRAGANA", "KATAKANA", "KATAKANA-HIRAGANA",
+                     "IDEOGRAPHIC"}),
+    "zh": frozenset({"CJK", "IDEOGRAPHIC", "BOPOMOFO"}),
+    "ko": frozenset({"HANGUL", "CJK"}),
+}
+_SCRIPT_SUBTAGS = {"Latn": frozenset({"LATIN"}), "Cyrl": _CYRILLIC,
+                   "Arab": _ARABIC,
+                   "Hans": _SCRIPTS_BY_LANG["zh"], "Hant": _SCRIPTS_BY_LANG["zh"],
+                   "Qaag": _SCRIPTS_BY_LANG["my"]}
+_LATIN = frozenset({"LATIN"})
+
+
+def expected_scripts(code: str) -> frozenset[str]:
+    """Unicode scripts a translation into `code` is expected to use.
+    Latin-script languages -> {"LATIN"}; script subtags override."""
+    parts = canonical_code(code).split("-")
+    for p in parts[1:]:
+        if p in _SCRIPT_SUBTAGS:
+            return _SCRIPT_SUBTAGS[p]
+    return _SCRIPTS_BY_LANG.get(parts[0], _LATIN)
 
 
 def canonical_code(code: str) -> str:

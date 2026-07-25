@@ -15,6 +15,7 @@ Notes:
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import urllib.error
@@ -85,6 +86,23 @@ def _http_stream_transport(url: str, payload: dict, timeout: int):
         raise OllamaError(f"cannot reach Ollama at {url}: {e.reason}") from e
 
 
+_FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```\s*$")
+
+
+def extract_json(raw: str) -> str:
+    """Tolerant extraction: some models (live case: gpt-oss:120b as a judge)
+    wrap the JSON into markdown fences despite the schema. Strip ```json
+    fences; failing that, take the first {...} block."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = _FENCE_RE.sub("", text).strip()
+    if not text.startswith("{"):
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            text = m.group(0)
+    return text
+
+
 def string_schema(keys: list[str]) -> dict:
     """JSON schema: object with a required string property per key."""
     return {
@@ -148,7 +166,7 @@ class OllamaClient:
             hint = " (the reply went into the 'thinking' field)" if message.get("thinking") else ""
             raise OllamaBadResponse(f"model returned empty content{hint}", raw=raw)
         try:
-            parsed = json.loads(raw)
+            parsed = json.loads(extract_json(raw))
         except json.JSONDecodeError as e:
             raise OllamaBadResponse(f"model returned invalid JSON: {raw[:300]!r}", raw=raw) from e
         if not isinstance(parsed, dict):

@@ -27,6 +27,7 @@ DEFAULTS = {
     "assume_stale": False, "overwrite": False, "bootstrap_strings": False,
     "fix_terms": False, "terms": False, "retranslate_model": None,
     "last": False, "since": "24h", "force_set": False,
+    "semantic": False, "fix_semantic": False,
 }
 
 
@@ -46,6 +47,9 @@ def _translate_flags(p: argparse.ArgumentParser) -> None:
                    help="override the Ollama model from l10n.toml (for A/B runs)")
     p.add_argument("--fix-terms", action="store_true", default=_S,
                    help="fix terminology divergences via re-translation (SPEC.md §13.4)")
+    p.add_argument("--fix-semantic", action="store_true", default=_S,
+                   help="re-translate suspects found by `verify --semantic`, telling "
+                        "the model what was wrong")
     p.add_argument("--retranslate-model", default=_S, metavar="PATTERN",
                    help="re-translate strings whose stored `model` matches this "
                         "fnmatch pattern (e.g. 'gemma3*', 'imported', 'manual')")
@@ -61,6 +65,9 @@ def _import_flags(p: argparse.ArgumentParser) -> None:
 def _verify_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--terms", action="store_true", default=_S,
                    help="build the LLM term map and report divergences (SPEC.md §13.3)")
+    p.add_argument("--semantic", action="store_true", default=_S,
+                   help="back-translation QA: judge meaning drift per string "
+                        "(expensive, two LLM passes; run selectively via --lang)")
 
 
 def _report_flags(p: argparse.ArgumentParser) -> None:
@@ -96,6 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
     v = sub.add_parser("verify", help="validate existing translations (LLM only with --terms)")
     _global_flags(v)
     _verify_flags(v)
+    v.add_argument("--model", default=_S,
+                   help="override the Ollama model for --terms/--semantic "
+                        "(audit with a different judge)")
 
     r = sub.add_parser("report", help="review recently translated strings")
     _global_flags(r)
@@ -163,8 +173,9 @@ def _print_plan(work: dict[str, list[str]], total: int, mod: str = "") -> None:
 
 
 def cmd_translate(project, args) -> int:
-    if args.model:
+    if args.model:  # explicit A/B override beats [models] per-language pins
         project.ollama.model = args.model
+        project.models = {}
     langs = _langs(project, args)
     work = plan(project, langs, args.force, args.limit, args.retranslate_model)
     todo = {k: v for k, v in work.items() if v}
@@ -181,12 +192,14 @@ def cmd_translate(project, args) -> int:
     elapsed = time.monotonic() - started
 
     # lock: snapshot of current base hashes (only when no fatal errors);
-    # terms caches: offline orphan cleanup (deleted strings leave everywhere)
+    # terms/semantic caches: offline orphan cleanup (deleted strings leave everywhere)
     fatal = [r for r in results if r.error]
     if not fatal:
         save_lock(project.root, base_hashes(project))
         from .terms import prune_term_maps
+        from .semantic import prune_semantic_caches
         prune_term_maps(project)
+        prune_semantic_caches(project)
 
     translated = sum(r.translated for r in results)
     failed = {r.lang: r.failed for r in results if r.failed}
@@ -199,6 +212,7 @@ def cmd_translate(project, args) -> int:
         for key, errors in fails.items():
             print(f"[{lang}] FAILED {key}: {'; '.join(errors)}")
     _report_stale_manual(stale_manual, results)
+    _report_weak([("", r) for r in results])
 
     rc = 0
     if fatal or failed:
@@ -206,11 +220,28 @@ def cmd_translate(project, args) -> int:
 
     if args.fix_terms and not fatal:
         rc = max(rc, _run_fix_terms(project, langs))
+    if args.fix_semantic and not fatal:
+        rc = max(rc, _run_fix_semantic(project, langs))
+    if _phased_semantic(project) and not fatal:
+        # separate judge model: check phase (one model swap), then fix phase
+        sus_langs = _phased_semantic_check(project, langs)
+        if sus_langs:
+            rc = max(rc, _run_fix_semantic(project, sus_langs))
 
     if not args.no_build and not fatal:
         rc2 = cmd_build(project, args)
         rc = rc or rc2
     return rc
+
+
+def _report_weak(tagged_results) -> None:
+    """End-of-run summary of weak languages (per-language hints were already
+    printed by the engine): mandatory, loud, never blocking."""
+    weak = [f"{mod}{r.lang}" if mod else r.lang
+            for mod, r in tagged_results if r.weak]
+    if weak:
+        print(f"\nWARNING: model looks weak in: {', '.join(weak)} — "
+              "see the per-language retranslation hints above")
 
 
 def _report_stale_manual(stale_manual: dict, results, mod: str = "") -> None:
@@ -225,6 +256,83 @@ def _report_stale_manual(stale_manual: dict, results, mod: str = "") -> None:
         if done:
             print(f"{mod}[{lang}] {len(done)} manual translation(s) were stale "
                   f"and retranslated: {', '.join(done)}")
+
+
+def _phased_semantic(project) -> bool:
+    return project.semantic_phased
+
+
+def _phased_semantic_check(project, langs) -> list[str]:
+    """Phase 2 of the separate-judge-model flow: after the whole run is
+    translated by the main model, swap to [validation].semantic_model ONCE and
+    QA everything fresh (cache delta — verified pairs are skipped). Returns
+    languages that have suspects; phase 3 (_run_fix_semantic) fixes them with
+    the main model — two model swaps per run total, never per batch."""
+    from dataclasses import replace as dc_replace
+
+    from .ollama import OllamaClient
+    from .semantic import build_semantic, suspects
+
+    judge = OllamaClient(dc_replace(project.ollama, model=project.semantic_model))
+    mod = f"{project.module}:" if project.module else ""
+    out = []
+    for lang in langs:
+        data = build_semantic(project, lang, load_locale(project.root, lang), judge)
+        n = len([1 for k, _, _ in suspects(data) if k in project.strings])
+        if n:
+            print(f"[{mod}{lang}] semantic (judge {project.semantic_model}): "
+                  f"{n} suspect(s)")
+            out.append(lang)
+    if not out:
+        print(f"{mod or ''}semantic (judge {project.semantic_model}): no suspects")
+    return out
+
+
+def _run_fix_semantic(project, langs) -> int:
+    """Re-translate suspects from the semantic cache (verify --semantic must
+    have run first), telling the model what the judge found wrong. Fixed keys
+    are dropped from the cache — the next --semantic run re-checks them."""
+    from .engine import translate_batch
+    from .fsutil import utc_now_iso
+    from .ollama import OllamaClient
+    from .semantic import clear_keys, load_semantic, suspects
+    from .store import save_locale
+
+    if project.ensemble:
+        # systemic path: suspects are unverified entries -> the ensemble
+        # phases (B: second model, C: meaning arbitration) re-resolve them
+        print("ensemble mode: re-resolving suspects via the ensemble phases")
+        results = run_translate(project, langs)
+        return 1 if any(r.error or r.failed for r in results) else 0
+
+    client = OllamaClient(project.ollama)
+    mod = f"{project.module}:" if project.module else ""
+    rc = 0
+    for lang in langs:
+        found = suspects(load_semantic(project, lang))
+        found = [(k, r, b) for k, r, b in found if k in project.strings]
+        if not found:
+            print(f"[{mod}{lang}] fix-semantic: no suspects")
+            continue
+        locale = load_locale(project.root, lang)
+        note = "Previous translations of these strings drifted in meaning:\n" + "\n".join(
+            f'- {k}: {r or "meaning drift"} (previous text literally meant: "{b}")'
+            for k, r, b in found) + "\nTranslate the MEANING of the source text correctly."
+        keys = [k for k, _, _ in found]
+        accepted, failed, _arb = translate_batch(project, client, lang, keys, locale,
+                                                 extra_note=note)
+        for key, text in accepted.items():
+            locale[key] = {"text": text, "src": base_hashes(project)[key],
+                           "model": project.ollama.model, "translated_at": utc_now_iso()}
+        if accepted:
+            save_locale(project.root, lang, locale, list(project.strings))
+            clear_keys(project, lang, list(accepted))
+        print(f"[{mod}{lang}] fix-semantic: retranslated {len(accepted)}"
+              + (f", failed {len(failed)}" if failed else ""))
+        for key, errors in failed.items():
+            print(f"[{mod}{lang}] fix-semantic FAILED {key}: {'; '.join(errors)}")
+            rc = 1
+    return rc
 
 
 def _run_fix_terms(project, langs) -> int:
@@ -263,6 +371,8 @@ def cmd_build(project, args) -> int:
 def cmd_verify(project, args) -> int:
     from .validate import check_translation
 
+    if args.model:  # audit with a different judge model (SPEC.md §7)
+        project.ollama.model = args.model
     adapter = get_adapter(project)
     langs = _langs(project, args)
     problems = 0
@@ -282,6 +392,30 @@ def cmd_verify(project, args) -> int:
         from .ollama import OllamaClient
         term_client = OllamaClient(project.ollama)
 
+    # semantic audit: languages are independent jobs (per-language cache
+    # files, per-job clients) -> run them over the configured worker pool
+    # up front; the sequential loop below only prints the results
+    sem_data: dict[str, dict] = {}
+    if args.semantic:
+        import concurrent.futures
+
+        from .ollama import OllamaClient
+        from .semantic import build_semantic
+
+        def _sem_job(lang: str) -> None:
+            client = OllamaClient(project.ollama)
+            sem_data[lang] = build_semantic(project, lang,
+                                            load_locale(project.root, lang), client)
+
+        workers = max(1, project.ollama.workers)
+        if workers == 1 or len(langs) == 1:
+            for lang in langs:
+                _sem_job(lang)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                for fut in [pool.submit(_sem_job, lang) for lang in langs]:
+                    fut.result()
+
     warn_count = 0
     # duplicate keys across modules of one group: Android merges resources
     # silently, so this is a warning, not an error (SPEC.md §14)
@@ -292,9 +426,17 @@ def cmd_verify(project, args) -> int:
             print(f'warning: duplicate keys with module "{sib.module}" '
                   f"(group {project.group}): {', '.join(dup)}")
 
+    from .langnames import expected_scripts
+    from .validate import script_mix
+
+    # script-mix allowlist: [validation].latin_allowlist + glossary terms (brands)
+    allow = frozenset({t.casefold() for t in project.latin_allowlist}
+                      | {w.casefold() for term in project.glossary for w in term.split()})
+
     for lang in langs:
         st = classify(project, lang)
         locale = load_locale(project.root, lang)
+        expected = expected_scripts(lang)
         for key in st.ok:
             base = project.strings[key].text
             text = locale[key]["text"]
@@ -302,22 +444,42 @@ def cmd_verify(project, args) -> int:
             for e in errs:
                 problems += 1
                 print(f"[{lang}] {key}: {e}")
+            for w in script_mix(text, expected, project.latin_token_max, allow):
+                warn_count += 1
+                print(f"[{lang}] warning: {key}: {w}")
         if not st.clean:
             print(f"[{lang}] pending work: {len(st.missing)} missing, "
                   f"{len(st.stale)} stale, {len(st.orphan)} orphan")
 
-        # terminology: warnings only, do not affect the exit code (SPEC.md §13.3)
+        # terminology: warnings only, do not affect the exit code (SPEC.md §13.3);
+        # aggregated per language — full list with --verbose
+        TERM_WARN_CAP = 8
         if term_client is not None:
-            data = build_term_map(project, lang, locale, term_client)
-            for d in divergences(data):
-                warn_count += 1
-                variants = "; ".join(f'"{v}" ({", ".join(ks)})' for v, ks in d.variants.items())
-                print(f'[{lang}] term "{d.term}" diverges: {variants} '
-                      f'-> majority "{d.majority}" ({d.fraction:.0%})')
+            lines = []
+            for d in divergences(data := build_term_map(project, lang, locale,
+                                                        term_client)):
+                variants = "; ".join(f'"{v}" ({", ".join(ks)})'
+                                     for v, ks in d.variants.items())
+                lines.append(f'[{lang}] term "{d.term}" diverges: {variants} '
+                             f'-> majority "{d.majority}" ({d.fraction:.0%})')
         else:
-            for w in heuristic_divergences(project, lang, locale):
+            lines = [f"[{lang}] warning: {w}"
+                     for w in heuristic_divergences(project, lang, locale)]
+        warn_count += len(lines)
+        shown = lines if args.verbose else lines[:TERM_WARN_CAP]
+        for line in shown:
+            print(line)
+        if len(lines) > len(shown):
+            print(f"[{lang}] ... and {len(lines) - len(shown)} more term "
+                  f"warning(s) (rerun with --verbose for the full list)")
+
+        # semantic QA: back-translation + judge, cached, warnings only
+        # (the LLM work already happened in parallel above)
+        if args.semantic:
+            from .semantic import suspects
+            for key, reason, back in suspects(sem_data[lang]):
                 warn_count += 1
-                print(f"[{lang}] warning: {w}")
+                print(f'[{lang}] SUSPECT {key}: {reason} | back: "{back}"')
 
     if warn_count:
         print(f"verify: {warn_count} warning(s)")
@@ -449,9 +611,11 @@ def cmd_report(project, args) -> int:
         window = parse_duration(args.since)
     except ValueError as e:
         raise ConfigError(str(e)) from e
+    from .semantic import load_semantic
+
     cutoff = datetime.now(timezone.utc) - window
     mod = f"[{project.module}] " if project.module else ""
-    total = 0
+    total = arb_total = 0
     for lang in _langs(project, args):
         locale = load_locale(project.root, lang)
         rows = [(key, e) for key in project.strings
@@ -459,21 +623,39 @@ def cmd_report(project, args) -> int:
                 and when >= cutoff]
         if not rows:
             continue
+        sem = load_semantic(project, lang)["entries"]
+        arb = [(k, e) for k, e in rows if sem.get(k, {}).get("verdict") == "arbitrated"]
+        plain = [(k, e) for k, e in rows if (k, e) not in arb]
         total += len(rows)
         print(f"{mod}[{lang}] {len(rows)} translated in the last {args.since}:")
-        for key, e in rows:
+        for key, e in plain:
             print(f'  {key}: "{e["text"]}" ({e.get("model", "?")}, {e["translated_at"]})')
-    print(f"{mod}report: {total} strings in the last {args.since}")
+        if arb:  # auto-resolved conflicts: reviewable, never blocking
+            arb_total += len(arb)
+            print(f"{mod}[{lang}] arbitrated (auto-resolved semantic disputes, "
+                  f"review optional — override via `lloc set`):")
+            for key, e in arb:
+                reason = sem.get(key, {}).get("reason", "")
+                print(f'  {key}: "{e["text"]}"' + (f" — {reason}" if reason else ""))
+            from .engine import WEAK_ARBITRATION_RATIO, WEAK_MIN_SAMPLE
+            if len(rows) >= WEAK_MIN_SAMPLE \
+                    and len(arb) / len(rows) >= WEAK_ARBITRATION_RATIO:
+                print(f"{mod}[{lang}] WARNING: model looks weak in {lang} "
+                      f"({round(100 * len(arb) / len(rows))}% arbitrated); "
+                      f"consider: translate --force --lang {lang} "
+                      f"--model qwen3.5:9b")
+    print(f"{mod}report: {total} strings in the last {args.since}"
+          + (f", {arb_total} arbitrated" if arb_total else ""))
     return 0
 
 
 # --- run lock (one mutating run per module) -------------------------------
 
 def _needs_lock(args) -> bool:
-    """Mutating commands hold the per-module run lock; `verify --terms`
-    writes term caches, so it counts too."""
+    """Mutating commands hold the per-module run lock; `verify --terms` and
+    `verify --semantic` write caches, so they count too."""
     return args.command in ("translate", "build", "import", "set") \
-        or (args.command == "verify" and args.terms)
+        or (args.command == "verify" and (args.terms or args.semantic))
 
 
 def _lock_ctx(project, args):
@@ -507,8 +689,9 @@ def cmd_translate_workspace(ws: Workspace, args) -> int:
     module_work = []
     jobs = []
     for m in ws.members:
-        if args.model:
+        if args.model:  # explicit A/B override beats [models] per-language pins
             m.ollama.model = args.model
+            m.models = {}
         work = plan(m, _member_langs(m, args), args.force, args.limit,
                     args.retranslate_model)
         module_work.append((m, work))
@@ -542,6 +725,8 @@ def cmd_translate_workspace(ws: Workspace, args) -> int:
         else:
             save_lock(m.root, base_hashes(m))  # lock is per module, as before
             prune_term_maps(m)
+            from .semantic import prune_semantic_caches
+            prune_semantic_caches(m)
         for r in rs:
             if r.error:
                 print(f"[{m.module}:{r.lang}] FATAL: {r.error}")
@@ -549,11 +734,25 @@ def cmd_translate_workspace(ws: Workspace, args) -> int:
                 print(f"[{m.module}:{r.lang}] FAILED {key}: {'; '.join(errors)}")
                 rc = 1
         _report_stale_manual(stale_by_module.get(m.module, {}), rs, mod=f"[{m.module}] ")
+    _report_weak([(f"{m.module}:", r) for m, r in results])
 
     if args.fix_terms:
         for m, work in module_work:
             if m.module not in fatal_modules:
                 rc = max(rc, _run_fix_terms(m, [lang for lang in work]))
+    if args.fix_semantic:
+        for m, work in module_work:
+            if m.module not in fatal_modules:
+                rc = max(rc, _run_fix_semantic(m, [lang for lang in work]))
+
+    # separate judge model: check ALL modules first (one model swap), then fix
+    # suspects per module with the main model (one swap back)
+    phased = [(m, [lang for lang in work]) for m, work in module_work
+              if m.module not in fatal_modules and _phased_semantic(m)]
+    to_fix = [(m, _phased_semantic_check(m, langs_)) for m, langs_ in phased]
+    for m, sus_langs in to_fix:
+        if sus_langs:
+            rc = max(rc, _run_fix_semantic(m, sus_langs))
 
     if not args.no_build:
         for m, _ in module_work:

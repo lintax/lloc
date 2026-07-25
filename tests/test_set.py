@@ -156,9 +156,17 @@ text = "Search now"
             "search_hint": {"text": "Поиск по списку", "src": "x",
                             "model": "manual"},
         }
+        # mark the LLM entry as judge-verified — unverified would be excluded
+        from lloc.semantic import _pair_hash, save_semantic
+        save_semantic(project, "ru", {
+            "version": 1, "language": "ru", "entries": {
+                "search_title": {"src": _pair_hash("Search everywhere", "Искать всюду"),
+                                 "verdict": "ok", "back": ""}}})
         batch = [project.strings["search_button"]]
-        examples = select_examples(project, batch, locale)
+        examples = select_examples(project, batch, locale, lang="ru")
+        # manual outranks verified
         self.assertEqual(examples[0], ("Search in the list", "Поиск по списку"))
+        self.assertEqual(examples[1], ("Search everywhere", "Искать всюду"))
         self.assertEqual(len(examples), 2)
 
 

@@ -72,6 +72,35 @@ class LangResult:
     failed: dict[str, list[str]] = field(default_factory=dict)  # key -> errors
     orphans_removed: int = 0
     error: str | None = None  # fatal (e.g. Ollama unreachable)
+    arbitrated: int = 0       # semantic disputes auto-resolved by forced choice
+    weak: bool = False        # arbitration ratio above WEAK_ARBITRATION_RATIO
+
+
+WEAK_ARBITRATION_RATIO = 0.25  # >= 25% arbitrated -> the model looks weak here
+WEAK_MIN_SAMPLE = 8            # ...but only on a meaningful sample
+
+
+def _effective_model(project: Project, lang: str) -> str:
+    """[models] per-language override, else the main [ollama] model."""
+    return project.models.get(lang, project.ollama.model)
+
+
+def _maybe_warn_weak(project: Project, lang: str, result: LangResult, tag: str) -> None:
+    """Loud per-language escalation: too many strings needed arbitration —
+    the model likely does not know this language. No auto-swap (VRAM thrash);
+    a mandatory warning with a concrete command instead."""
+    if result.translated < WEAK_MIN_SAMPLE:
+        return
+    ratio = result.arbitrated / result.translated
+    if ratio < WEAK_ARBITRATION_RATIO:
+        return
+    result.weak = True
+    used = _effective_model(project, lang)
+    alt = "qwen3.5:9b" if used != "qwen3.5:9b" else "gemma4:12b-it-qat"
+    _log(f"[{tag}] WARNING: model looks weak in {lang} "
+         f"({round(100 * ratio)}% arbitrated); retranslate with an alternate "
+         f"model: translate --force --lang {lang} --model {alt} "
+         f"(or pin it: [models] \"{lang}\" = \"{alt}\")")
 
 
 def _batches(keys: list[str], size: int) -> list[list[str]]:
@@ -85,12 +114,24 @@ def translate_batch(
     keys: list[str],
     locale: dict[str, dict],
     extra_note: str | None = None,
-) -> tuple[dict[str, str], dict[str, list[str]]]:
-    """Translate one batch. Returns (accepted {key: text}, failed {key: errors}).
+    semantic: bool = False,
+) -> tuple[dict[str, str], dict[str, list[str]], dict[str, tuple[str, str, int]]]:
+    """Translate one batch. Returns (accepted {key: text}, failed {key: errors},
+    arbitrated {key: (text, reason, n_candidates)}).
 
     Validation failures trigger a retry of the failed subset with the error text
     appended to the conversation, up to max_retries. `extra_note` is prepended
-    to the examples block (used by --fix-terms to pin a terminology variant)."""
+    to the examples block (used by --fix-terms to pin a terminology variant).
+
+    With `semantic=True` every validation-accepted string additionally passes
+    the back-translation QA (semantic.check_texts, same model): suspects are
+    bounced back into the retry loop with the judge's feedback. When retries
+    are exhausted on a PURELY SEMANTIC dispute, the judge arbitrates a forced
+    choice among all collected candidates — the winner lands in `accepted`
+    AND in `arbitrated` (SPEC.md §13.6); `failed` remains only for mechanics
+    (transport errors, broken placeholders — those would break the app and
+    are not a matter of taste). Costs two extra LLM calls per batch
+    (~2.5-3x slower) — that is the point: safety over speed."""
     entries = [project.strings[k] for k in keys]
     schema = string_schema(keys)
     prompt = build_translate_prompt(project, lang, entries, locale, extra_note)
@@ -99,6 +140,7 @@ def translate_batch(
     accepted: dict[str, str] = {}
     pending = {e.key: e for e in entries}
     last_errors: dict[str, list[str]] = {}
+    candidates: dict[str, list[str]] = {}  # semantically bounced texts per key
 
     for attempt in range(project.ollama.max_retries + 1):
         try:
@@ -117,15 +159,56 @@ def translate_batch(
             ]
             continue
         last_errors = {}
+        newly: dict[str, str] = {}
         for key, entry in list(pending.items()):
             value = parsed.get(key)
             errors = check_translation(entry.text, value, project.length_ratio) \
                 if value is not None else ["missing from response"]
+            if not errors and project.script_check:
+                # wrong-script candidates are rejected inline (live case: both
+                # cloud models write Serbian in Latin unless pushed back)
+                from .langnames import expected_scripts
+                from .validate import script_error
+                allow = frozenset(
+                    {t.casefold() for t in project.latin_allowlist}
+                    | {w.casefold() for term in project.glossary for w in term.split()})
+                err = script_error(value, expected_scripts(lang),
+                                   project.latin_token_max, allow)
+                if err:
+                    errors = [err]
             if not errors:
-                accepted[key] = value
+                newly[key] = value
                 del pending[key]
             else:
                 last_errors[key] = errors
+
+        if semantic and newly:
+            from .semantic import check_texts
+            try:
+                qa_verdicts = check_texts(project, lang, newly, client)
+            except OllamaBadResponse:
+                # unusable judge output after retries: bounce the batch into
+                # the normal retry loop rather than shipping unchecked text
+                for key in list(newly):
+                    pending[key] = project.strings[key]
+                    last_errors[key] = ["semantic check unavailable "
+                                        "(judge reply unusable); retrying"]
+                    del newly[key]
+                qa_verdicts = {}
+            for key, (ok, reason, back) in qa_verdicts.items():
+                if ok:
+                    continue
+                pending[key] = project.strings[key]
+                candidates.setdefault(key, []).append(newly[key])
+                # both sides of the conflict stay visible in the retry prompt
+                last_errors[key] = [
+                    f"meaning drift: {reason or 'the meaning was not preserved'}"
+                    + f' (translation: "{newly[key]}"'
+                    + (f', literally back-translates as "{back}")' if back else ")")
+                    + "; translate the MEANING of the source text"]
+                del newly[key]
+        accepted.update(newly)
+
         if not pending or attempt == project.ollama.max_retries:
             break
         flat = [f"{k}: {'; '.join(v)}" for k, v in last_errors.items()]
@@ -135,7 +218,23 @@ def translate_batch(
             {"role": "user", "content": retry_prompt},
         ]
         schema = string_schema(list(pending))
-    return accepted, last_errors
+
+    # arbitration: retries exhausted on a purely semantic dispute -> the judge
+    # makes a forced choice among the collected candidates (they all passed
+    # placeholder validation, so any of them is safe to ship)
+    arbitrated: dict[str, tuple[str, str, int]] = {}
+    if semantic:
+        from .semantic import arbitrate
+        for key in list(pending):
+            cands = candidates.get(key, [])
+            errs = last_errors.get(key, [])
+            if cands and errs and all(e.startswith("meaning drift") for e in errs):
+                winner, reason = arbitrate(project, lang, key, cands, client)
+                arbitrated[key] = (winner, reason, len(dict.fromkeys(cands)))
+                accepted[key] = winner
+                del pending[key]
+                last_errors.pop(key, None)
+    return accepted, last_errors, arbitrated
 
 
 def translate_language(
@@ -145,13 +244,27 @@ def translate_language(
     transport=None,
 ) -> LangResult:
     """Translate `keys` for one language, saving the locale after every batch."""
+    if project.semantic_inline_judge:
+        return _judged_translate_language(project, lang, keys, transport)
+
+    from dataclasses import replace as dc_replace
+
     result = LangResult(lang=lang)
-    client = OllamaClient(project.ollama, transport=transport)
+    model_name = _effective_model(project, lang)  # [models] per-language override
+    cfg = project.ollama if model_name == project.ollama.model \
+        else dc_replace(project.ollama, model=model_name)
+    client = OllamaClient(cfg, transport=transport)
     locale = load_locale(project.root, lang)
     order = list(project.strings)
 
     orphans = [k for k in locale if k not in project.strings]
     result.orphans_removed = len(orphans)
+
+    # inline semantic QA: default mode, same model. A separate judge model
+    # either runs concurrently (semantic_mode = "inline", small judge fits
+    # in VRAM next to the main model) or switches the run to phased mode
+    # (CLI level) — swapping big models per batch would thrash a 12 GB GPU.
+    inline_qa = project.semantic_mode == "batch" and not project.semantic_model
 
     tag = f"{project.module}:{lang}" if project.module else lang
     batches = _batches(keys, project.ollama.batch_size)
@@ -160,28 +273,214 @@ def translate_language(
             return result
         label = f"[{tag}] batch {i}/{len(batches)}"
         _log(f"{label}: translating {len(batch)} strings...")
-        _note_model_load(project.ollama.model)
+        _note_model_load(model_name)
         started = time.monotonic()
         try:
             with _heartbeat(label):
-                accepted, failed = translate_batch(project, client, lang, batch, locale)
+                accepted, failed, arbitrated = translate_batch(
+                    project, client, lang, batch, locale, semantic=inline_qa)
         except OllamaError as e:
             result.error = str(e)
             _log(f"{label}: FATAL {e}")
             break
         elapsed = time.monotonic() - started
+        result.arbitrated += len(arbitrated)
         for key, text in accepted.items():
             locale[key] = {"text": text, "src": text_hash(project.strings[key].text),
-                           "model": project.ollama.model, "translated_at": utc_now_iso()}
+                           "model": model_name, "translated_at": utc_now_iso()}
         result.translated += len(accepted)
         result.failed.update(failed)
         save_locale(project.root, lang, locale, order)  # progress survives interruption
+        if inline_qa and accepted:
+            from .semantic import mark_arbitrated, mark_ok
+            verified = {k: t for k, t in accepted.items() if k not in arbitrated}
+            mark_ok(project, lang, verified)  # verified -> cache: reruns skip them
+            mark_arbitrated(project, lang,
+                            {k: (t, r) for k, (t, r, _n) in arbitrated.items()})
+        for key, (text, reason, n) in arbitrated.items():
+            _log(f'[{tag}] ARBITRATED {key}: chose "{text}" over {n} candidate(s)'
+                 + (f" ({reason})" if reason else ""))
         _log(f"{label}: +{len(accepted)} in {elapsed:.1f}s"
              + (f", failed {len(failed)}" if failed else ""))
 
     if result.error is None and (orphans or not batches):
         save_locale(project.root, lang, locale, order)  # drop orphans even with empty delta
+    if result.error is None:
+        _maybe_warn_weak(project, lang, result, tag)
     return result
+
+
+def _judged_translate_language(
+    project: Project,
+    lang: str,
+    keys: list[str],
+    transport=None,
+) -> LangResult:
+    """Concurrent inline judge ([validation] semantic_mode = "inline"): the
+    main model translates at full speed while a separate (small) judge model
+    checks the PREVIOUS batch in parallel — batch N translates while N-1 is
+    being judged. A locale entry is written only after an "ok" verdict;
+    suspects are re-translated by the main model with the judge's feedback
+    and re-judged. On interruption unverified batches are simply not written
+    — they stay pending and the next run redoes them."""
+    from dataclasses import replace as dc_replace
+
+    from .semantic import check_texts, mark_ok
+
+    result = LangResult(lang=lang)
+    model_name = _effective_model(project, lang)  # [models] per-language override
+    cfg = project.ollama if model_name == project.ollama.model \
+        else dc_replace(project.ollama, model=model_name)
+    client = OllamaClient(cfg, transport=transport)
+    judge = OllamaClient(dc_replace(project.ollama, model=project.semantic_model),
+                         transport=transport)
+    locale = load_locale(project.root, lang)
+    order = list(project.strings)
+    orphans = [k for k in locale if k not in project.strings]
+    result.orphans_removed = len(orphans)
+
+    tag = f"{project.module}:{lang}" if project.module else lang
+    batches = _batches(keys, project.ollama.batch_size)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    inflight: tuple[str, dict[str, str], concurrent.futures.Future] | None = None
+    # key -> (judge reason, back-translation, flagged candidate text)
+    to_retry: dict[str, tuple[str, str, str]] = {}
+
+    def commit(texts: dict[str, str], verified: bool = True) -> None:
+        if not texts:
+            return
+        for key, text in texts.items():
+            locale[key] = {"text": text, "src": text_hash(project.strings[key].text),
+                           "model": model_name, "translated_at": utc_now_iso()}
+        result.translated += len(texts)
+        save_locale(project.root, lang, locale, order)
+        if verified:
+            mark_ok(project, lang, texts)
+
+    def resolve(entry) -> None:
+        label, accepted, fut = entry
+        verdicts = fut.result()
+        good = {}
+        for key, text in accepted.items():
+            ok, reason, back = verdicts.get(key, (True, "", ""))
+            if ok:
+                good[key] = text
+            else:
+                to_retry[key] = (reason, back, text)
+        commit(good)
+        if len(good) < len(accepted):
+            _log(f"{label}: judge flagged {len(accepted) - len(good)} suspect(s)")
+
+    try:
+        for i, batch in enumerate(batches, 1):
+            if _cancel.is_set():  # unverified stays pending, verified is on disk
+                return result
+            label = f"[{tag}] batch {i}/{len(batches)}"
+            _log(f"{label}: translating {len(batch)} strings...")
+            _note_model_load(model_name)
+            started = time.monotonic()
+            try:
+                with _heartbeat(label):
+                    accepted, failed, _arb = translate_batch(project, client, lang, batch,
+                                                             locale, semantic=False)
+            except OllamaError as e:
+                result.error = str(e)
+                _log(f"{label}: FATAL {e}")
+                return result
+            result.failed.update(failed)
+            if inflight is not None:  # judge of batch i-1 ran while we translated
+                resolve(inflight)
+                inflight = None
+            if accepted:
+                inflight = (label, accepted,
+                            pool.submit(check_texts, project, lang, dict(accepted), judge))
+            _log(f"{label}: +{len(accepted)} translated in "
+                 f"{time.monotonic() - started:.1f}s, judging in background"
+                 + (f", failed {len(failed)}" if failed else ""))
+        if inflight is not None and not _cancel.is_set():
+            resolve(inflight)
+            inflight = None
+
+        # retry cycle: main model re-translates suspects with the judge's
+        # feedback, the judge re-checks synchronously; a still-standing
+        # dispute goes to arbitration — a forced choice among the candidates
+        # (SPEC.md §13.6): auto-resolve, log, never block
+        if to_retry and not _cancel.is_set():
+            from .semantic import arbitrate, mark_arbitrated
+
+            retry_keys = [k for k in order if k in to_retry]
+            note = ("A separate QA judge flagged your previous translations "
+                    "as meaning drift:\n" + "\n".join(
+                        f'- {k}: {reason or "meaning not preserved"} '
+                        f'(literal back-translation: "{back}")'
+                        for k, (reason, back, _t) in to_retry.items())
+                    + "\nTranslate the MEANING of the source text correctly.")
+            for rbatch in _batches(retry_keys, project.ollama.batch_size):
+                if _cancel.is_set():
+                    return result
+                accepted, failed, _arb = translate_batch(project, client, lang, rbatch,
+                                                         locale, extra_note=note,
+                                                         semantic=False)
+                result.failed.update(failed)  # mechanics only (placeholders etc.)
+                verdicts = check_texts(project, lang, accepted, judge)
+                good = {}
+                arbitrated: dict[str, tuple[str, str]] = {}
+                for key, text in accepted.items():
+                    ok, reason, back = verdicts.get(key, (True, "", ""))
+                    if ok:
+                        good[key] = text
+                        continue
+                    cands = [to_retry[key][2], text] if key in to_retry else [text]
+                    winner, why = arbitrate(project, lang, key, cands, judge)
+                    arbitrated[key] = (winner, why)
+                    _log(f'[{tag}] ARBITRATED {key}: chose "{winner}" over '
+                         f"{len(dict.fromkeys(cands))} candidate(s)"
+                         + (f" ({why})" if why else ""))
+                commit(good)
+                commit({k: t for k, (t, _r) in arbitrated.items()}, verified=False)
+                mark_arbitrated(project, lang, arbitrated)
+                result.arbitrated += len(arbitrated)
+    except OllamaError as e:  # judge unreachable: verified work is on disk
+        result.error = str(e)
+        _log(f"[{tag}] FATAL (judge): {e}")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    if result.error is None and (orphans or not batches):
+        save_locale(project.root, lang, locale, order)  # drop orphans even with empty delta
+    if result.error is None and not _cancel.is_set():
+        _maybe_warn_weak(project, lang, result, tag)
+    return result
+
+
+ANCHOR_COLD_RATIO = 0.10  # cold start: fewer than 10% of strings accepted
+
+
+def _anchor_order(project: Project, keys: list[str], ok_count: int) -> list[str]:
+    """Cold-start ordering (SPEC.md §13.6): when a language is (almost) empty,
+    translate ANCHORS first — one representative string per frequent term,
+    picked for the richest context and the shortest text. They pass the usual
+    semantic QA, so the rest of the volume sees verified anchors in few-shot
+    instead of learning terms from unchecked neighbours. Incremental runs
+    (>= 10% accepted) keep the plain strings.toml order."""
+    total = len(project.strings) or 1
+    if not keys or ok_count >= ANCHOR_COLD_RATIO * total:
+        return keys
+    from .terms import extract_terms
+
+    keyset = set(keys)
+    anchors: list[str] = []
+    seen: set[str] = set()
+    for _term, term_keys in extract_terms(project).items():
+        cands = [k for k in term_keys if k in keyset]
+        if not cands:
+            continue
+        best = min(cands, key=lambda k: (-len(project.strings[k].context),
+                                         len(project.strings[k].text), k))
+        if best not in seen:
+            seen.add(best)
+            anchors.append(best)
+    return anchors + [k for k in keys if k not in seen]
 
 
 def plan(project: Project, langs: list[str], force: bool, limit: int | None,
@@ -204,6 +503,7 @@ def plan(project: Project, langs: list[str], force: bool, limit: int | None,
             extra = {k for k in st.ok
                      if fnmatchcase(locale[k].get("model", ""), retranslate_model)}
             keys = [k for k in project.strings if k in chosen or k in extra]
+        keys = _anchor_order(project, keys, len(st.ok))
         if limit is not None:
             keys = keys[:limit]
         out[lang] = keys
@@ -223,6 +523,425 @@ def manual_stale(project: Project, langs: list[str]) -> dict[str, list[str]]:
     return out
 
 
+def _run_phase(indices, fn, workers: int) -> None:
+    """Run one ensemble phase over language jobs, `workers` in parallel.
+    With cloud models there is no VRAM constraint — parallelism is limited
+    only by the provider; on Ctrl+C never wait for in-flight requests."""
+    if workers <= 1:
+        for i in indices:
+            if _cancel.is_set():
+                return
+            fn(i)
+        return
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+    futures = [pool.submit(fn, i) for i in indices]
+    try:
+        for fut in concurrent.futures.as_completed(futures):
+            fut.result()
+    except KeyboardInterrupt:
+        _cancel.set()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
+
+
+def _ensemble_batch_language(project: Project, lang: str, keys: list[str],
+                             transport=None) -> LangResult:
+    """Concurrent per-batch ensemble ([validation].ensemble_concurrency =
+    "batch", or "auto" with an all-cloud model trio): the phases were a
+    VRAM-swap artifact — with cloud models A and B translate THE SAME batch
+    in parallel (two concurrent requests) and the judge follows immediately.
+    Nothing is written before the verdict: an interrupted batch leaves no
+    partial pairs, the whole batch stays pending for the next run."""
+    from dataclasses import replace as dc_replace
+
+    from .semantic import (ensemble_compare, load_semantic, mark_arbitrated,
+                           mark_ok, _pair_hash)
+
+    result = LangResult(lang=lang)
+    model_a = _effective_model(project, lang)
+    client_a = OllamaClient(
+        project.ollama if model_a == project.ollama.model
+        else dc_replace(project.ollama, model=model_a), transport=transport)
+    client_b = OllamaClient(dc_replace(project.ollama, model=project.ensemble_model),
+                            transport=transport)
+    judge = OllamaClient(dc_replace(project.ollama, model=project.ensemble_judge),
+                         transport=transport)
+    locale = load_locale(project.root, lang)
+    order = list(project.strings)
+    orphans = [k for k in locale if k not in project.strings]
+    result.orphans_removed = len(orphans)
+    tag = f"{project.module}:{lang}" if project.module else lang
+    judged_total = 0
+    b_wins = 0
+    processed: set[str] = set()
+
+    # strong third-party judge (produced neither candidate) compares the
+    # pair against the original DIRECTLY — no back-translations, one call
+    # per batch (see semantic.ensemble_compare)
+    direct = project.ensemble_judge not in (model_a, project.ensemble_model)
+
+    def judge_and_commit(pairs: dict[str, tuple[str, str]],
+                         a_new: dict[str, str], label: str = "") -> None:
+        """C-judge the pairs, then write everything in ONE save: A-only keys
+        as unverified-pending, agreed as ok, disputes as arbitrated."""
+        nonlocal judged_total, b_wins
+        started = time.monotonic()
+        try:
+            verdicts = ensemble_compare(project, lang, pairs, judge,
+                                        direct=direct) if pairs else {}
+        except OllamaBadResponse as e:
+            # judge unusable after retries: ship nothing from this batch's
+            # pairs (they stay pending), keep A-only keys unverified
+            _log(f"{label or f'[{tag}] C'}: warning — skipping "
+                 f"{len(pairs)} pair(s), judge reply unusable: {e}")
+            pairs = {}
+            verdicts = {}
+        for key, text in a_new.items():
+            locale[key] = {"text": text, "src": text_hash(project.strings[key].text),
+                           "model": model_a, "translated_at": utc_now_iso()}
+        result.translated += len(a_new)
+        agreed: dict[str, str] = {}
+        arbitrated: dict[str, tuple[str, str]] = {}
+        for k, (a_text, b_text) in pairs.items():
+            v = verdicts.get(k, "c1")
+            judged_total += 1
+            processed.add(k)
+            if v == "agree":
+                agreed[k] = locale[k]["text"] if k not in a_new else a_text
+                continue
+            winner = a_text if v == "c1" else b_text
+            if v == "c2":
+                b_wins += 1
+                locale[k] = {"text": winner,
+                             "src": text_hash(project.strings[k].text),
+                             "model": project.ensemble_model,
+                             "translated_at": utc_now_iso()}
+            arbitrated[k] = (winner, f"ensemble judge picked {v}")
+            _log(f'[{tag}] ARBITRATED {k}: chose "{winner}" over 2 candidate(s) '
+                 f"(ensemble {v})")
+        save_locale(project.root, lang, locale, order)
+        mark_ok(project, lang, agreed)
+        mark_arbitrated(project, lang, arbitrated)
+        result.arbitrated += len(arbitrated)
+        if pairs:
+            n_c2 = sum(1 for k, (t, r) in arbitrated.items() if r.endswith("c2"))
+            _log(f"{label or f'[{tag}] C'}: agree {len(agreed)}, "
+                 f"c1 {len(arbitrated) - n_c2}, c2 {n_c2} "
+                 f"in {time.monotonic() - started:.1f}s")
+
+    ab_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    try:
+        # --- fresh delta: A and B race on every batch --------------------
+        batches = _batches(keys, project.ollama.batch_size)
+        for n, batch in enumerate(batches, 1):
+            if _cancel.is_set():
+                return result
+            label = f"[{tag}] A+B {n}/{len(batches)}"
+            _log(f"{label}: translating {len(batch)} strings (2 models)...")
+            fut_a = ab_pool.submit(translate_batch, project, client_a, lang,
+                                   batch, locale, None, False)
+            fut_b = ab_pool.submit(translate_batch, project, client_b, lang,
+                                   batch, locale, None, False)
+            acc_a, failed_a, _ = fut_a.result()
+            acc_b, _failed_b, _ = fut_b.result()
+            result.failed.update(failed_a)
+            pairs = {k: (acc_a[k], acc_b[k]) for k in acc_a if k in acc_b}
+            judge_and_commit(pairs, acc_a, label=f"[{tag}] C {n}/{len(batches)}")
+            # survivor rule: A's candidate failed validation (e.g. wrong
+            # script), B's passed -> B ships as arbitrated, not a failure
+            b_only = {k: t for k, t in acc_b.items() if k not in acc_a}
+            if b_only:
+                for k, t in b_only.items():
+                    locale[k] = {"text": t, "src": text_hash(project.strings[k].text),
+                                 "model": project.ensemble_model,
+                                 "translated_at": utc_now_iso()}
+                    result.failed.pop(k, None)
+                    _log(f'[{tag}] ARBITRATED {k}: chose "{t}" — the only valid '
+                         "candidate (main model candidate failed validation)")
+                save_locale(project.root, lang, locale, order)
+                from .semantic import mark_arbitrated as _mark_arb
+                _mark_arb(project, lang,
+                          {k: (t, "only valid candidate") for k, t in b_only.items()})
+                result.translated += len(b_only)
+                result.arbitrated += len(b_only)
+            _log(f"{label}: +{len(acc_a) + len(b_only)} judged"
+                 + (f", failed {len(result.failed)}" if result.failed else ""))
+
+        # --- leftover unverified entries from earlier runs: B + judge ----
+        entries = load_semantic(project, lang)["entries"]
+        due = []
+        for key, se in project.strings.items():
+            e = locale.get(key)
+            if not (e and e.get("text")) or key in processed \
+                    or e.get("model") in ("manual", "imported"):
+                continue
+            cached = entries.get(key, {})
+            if cached.get("src") != _pair_hash(se.text, e["text"]) \
+                    or cached.get("verdict") != "ok":
+                due.append(key)
+        for batch in _batches(due, project.ollama.batch_size):
+            if _cancel.is_set():
+                return result
+            acc_b, _failed_b, _ = translate_batch(project, client_b, lang, batch,
+                                                  locale, semantic=False)
+            pairs = {k: (locale[k]["text"], acc_b[k]) for k in acc_b}
+            judge_and_commit(pairs, {})
+    except OllamaError as e:
+        result.error = str(e)
+        _log(f"[{tag}] FATAL {e}")
+    finally:
+        ab_pool.shutdown(wait=False, cancel_futures=True)
+
+    if result.error is None and (orphans or not keys) and not _cancel.is_set():
+        save_locale(project.root, lang, locale, order)  # orphan cleanup
+    if result.error is None and not _cancel.is_set() \
+            and judged_total >= WEAK_MIN_SAMPLE \
+            and b_wins / judged_total >= WEAK_ARBITRATION_RATIO:
+        result.weak = True
+        _log(f"[{tag}] WARNING: phase-A model looks weak in {lang} "
+             f"({round(100 * b_wins / judged_total)}% of arbitrations lost to "
+             f"{project.ensemble_model}); consider pinning: "
+             f"[models] \"{lang}\" = \"{project.ensemble_model}\"")
+    return result
+
+
+def _ensemble_run(jobs: list[tuple[Project, str, list[str]]],
+                  workers: int = 1,
+                  transport=None) -> list[tuple[Project, LangResult]]:
+    """Ensemble mode (SPEC.md §13.7): every string is translated by TWO models
+    with meaning-only arbitration, strictly phased to minimize model swaps
+    (two models do NOT fit into 12 GB together):
+
+      A: the main model (respecting [models] pins) translates the plan delta
+         with format validation; results land in locale UNVERIFIED (no cache
+         verdict -> excluded from the few-shot pool until phase C).
+      B: one swap — the ensemble model independently translates every
+         unverified entry (same trusted few-shot pool).
+      C: the judge (semantic_model if set, else the ensemble model — zero
+         extra swaps by default) compares the candidates per key by MEANING:
+         agree -> verdict ok (trusted pool), otherwise the winner is written
+         with verdict arbitrated (re-checked by the next semantic pass).
+
+    Interruption is safe at any point: phase A is saved per batch as
+    unverified-pending; phases B/C redo whatever is still unverified."""
+    from dataclasses import replace as dc_replace
+
+    from .semantic import (ensemble_compare, load_semantic, mark_arbitrated,
+                           mark_ok, _pair_hash)
+
+    jobs = order_jobs(jobs)
+    results: dict[int, LangResult] = {i: LangResult(lang=jobs[i][1])
+                                      for i in range(len(jobs))}
+
+    # concurrent per-batch mode (cloud trio / explicit "batch"): no phases —
+    # A+B race per batch, the judge follows inline; languages parallelized
+    batch_idx = [i for i in range(len(jobs)) if jobs[i][0].ensemble_batch]
+    phased_idx = [i for i in range(len(jobs)) if not jobs[i][0].ensemble_batch]
+    if batch_idx:
+        _log("=== ensemble (concurrent): A+B in parallel per batch, judge inline ===")
+
+        def _batch_job(i: int) -> None:
+            p, lang, keys = jobs[i]
+            results[i] = _ensemble_batch_language(p, lang, keys, transport)
+
+        _run_phase(batch_idx, _batch_job, workers)
+    if not phased_idx:
+        return [(jobs[i][0], results[i]) for i in range(len(jobs))]
+
+    # --- phase A: main model over the plan delta -------------------------
+    _log("=== ensemble phase A: main model translates the delta ===")
+
+    def _phase_a(i: int) -> None:
+        project, lang, keys = jobs[i]
+        tag = f"{project.module}:{lang}" if project.module else lang
+        result = results[i]
+        model_a = _effective_model(project, lang)
+        cfg = project.ollama if model_a == project.ollama.model \
+            else dc_replace(project.ollama, model=model_a)
+        client = OllamaClient(cfg, transport=transport)
+        locale = load_locale(project.root, lang)
+        order = list(project.strings)
+        orphans = [k for k in locale if k not in project.strings]
+        result.orphans_removed = len(orphans)
+        batches = _batches(keys, project.ollama.batch_size)
+        for n, batch in enumerate(batches, 1):
+            if _cancel.is_set():
+                return
+            label = f"[{tag}] A {n}/{len(batches)}"
+            _note_model_load(model_a)
+            try:
+                with _heartbeat(label):
+                    accepted, failed, _arb = translate_batch(
+                        project, client, lang, batch, locale, semantic=False)
+            except OllamaError as e:
+                result.error = str(e)
+                _log(f"{label}: FATAL {e}")
+                break
+            result.failed.update(failed)
+            result.translated += len(accepted)
+            for key, text in accepted.items():
+                locale[key] = {"text": text, "src": text_hash(project.strings[key].text),
+                               "model": model_a, "translated_at": utc_now_iso()}
+            save_locale(project.root, lang, locale, order)  # unverified-pending
+            _log(f"{label}: +{len(accepted)}"
+                 + (f", failed {len(failed)}" if failed else ""))
+        if result.error is None and (orphans or not batches):
+            save_locale(project.root, lang, locale, order)
+
+    _run_phase(phased_idx, _phase_a, workers)
+
+    # --- phase B: the ensemble model translates independently ------------
+    b_texts: dict[int, dict[str, str]] = {}
+    unverified: dict[int, list[str]] = {}
+    for i in phased_idx:
+        project, lang, _keys = jobs[i]
+        if results[i].error is not None or _cancel.is_set():
+            continue
+        locale = load_locale(project.root, lang)
+        entries = load_semantic(project, lang)["entries"]
+        due = []
+        for key, se in project.strings.items():
+            e = locale.get(key)
+            # machine translations only: manual fixes are human truth,
+            # imported entries are live production strings — both are audited
+            # by verify --semantic, never rewritten by the ensemble
+            if not (e and e.get("text")) or e.get("model") in ("manual", "imported"):
+                continue
+            cached = entries.get(key, {})
+            # due = anything not judge-verified for exactly this pair:
+            # no verdict, stale hash, suspect or arbitrated
+            if cached.get("src") != _pair_hash(se.text, e["text"]) \
+                    or cached.get("verdict") != "ok":
+                due.append(key)
+        unverified[i] = due
+    if any(unverified.values()) and not _cancel.is_set():
+        _log("=== ensemble phase B: independent second translation ===")
+
+    def _phase_b(i: int) -> None:
+        project, lang, _keys = jobs[i]
+        due = unverified.get(i) or []
+        if not due:
+            return
+        tag = f"{project.module}:{lang}" if project.module else lang
+        client_b = OllamaClient(dc_replace(project.ollama, model=project.ensemble_model),
+                                transport=transport)
+        locale = load_locale(project.root, lang)
+        texts: dict[str, str] = {}
+        for n, batch in enumerate(_batches(due, project.ollama.batch_size), 1):
+            if _cancel.is_set():
+                break
+            label = f"[{tag}] B {n}"
+            _note_model_load(project.ensemble_model)
+            try:
+                with _heartbeat(label):
+                    accepted, failed, _arb = translate_batch(
+                        project, client_b, lang, batch, locale, semantic=False)
+            except OllamaError as e:
+                results[i].error = str(e)
+                _log(f"{label}: FATAL {e}")
+                break
+            texts.update(accepted)  # B's validation rejects stay A-only
+        b_texts[i] = texts
+
+    _run_phase(phased_idx, _phase_b, workers)
+
+    # --- phase C: meaning-only arbitration -------------------------------
+    if any(b_texts.values()) and not _cancel.is_set():
+        _log("=== ensemble phase C: meaning arbitration ===")
+
+    def _phase_c(i: int) -> None:
+        project, lang, _keys = jobs[i]
+        texts = b_texts.get(i) or {}
+        if not texts or results[i].error is not None:
+            return
+        tag = f"{project.module}:{lang}" if project.module else lang
+        judge = OllamaClient(dc_replace(project.ollama, model=project.ensemble_judge),
+                             transport=transport)
+        locale = load_locale(project.root, lang)
+        order = list(project.strings)
+        result = results[i]
+        judged_total = 0
+        b_wins = 0
+        # third-party judge (produced neither candidate) -> direct comparison,
+        # no back-translations (semantic.ensemble_compare)
+        direct = project.ensemble_judge not in (_effective_model(project, lang),
+                                                project.ensemble_model)
+        keys_c = [k for k in order if k in texts and locale.get(k, {}).get("text")]
+        c_batches = _batches(keys_c, project.ollama.batch_size)
+        for n, batch in enumerate(c_batches, 1):
+            if _cancel.is_set():
+                break
+            started = time.monotonic()
+            pairs = {k: (locale[k]["text"], texts[k]) for k in batch}
+            try:
+                verdicts = ensemble_compare(project, lang, pairs, judge,
+                                            direct=direct)
+            except OllamaBadResponse as e:
+                _log(f"[{tag}] C warning: skipping batch of {len(batch)} "
+                     f"(judge reply unusable: {e})")
+                continue  # stays unverified, re-judged next run
+            except OllamaError as e:
+                result.error = str(e)
+                _log(f"[{tag}] C FATAL {e}")
+                break
+            agreed: dict[str, str] = {}
+            arbitrated: dict[str, tuple[str, str]] = {}
+            batch_c2 = 0
+            for k in batch:
+                v = verdicts.get(k, "c1")
+                judged_total += 1
+                if v == "agree":
+                    agreed[k] = locale[k]["text"]
+                    continue
+                winner = pairs[k][0] if v == "c1" else pairs[k][1]
+                if v == "c2":
+                    b_wins += 1
+                    batch_c2 += 1
+                    locale[k] = {"text": winner,
+                                 "src": text_hash(project.strings[k].text),
+                                 "model": project.ensemble_model,
+                                 "translated_at": utc_now_iso()}
+                arbitrated[k] = (winner, f"ensemble judge picked {v}")
+                _log(f'[{tag}] ARBITRATED {k}: chose "{winner}" over 2 candidate(s) '
+                     f"(ensemble {v})")
+            save_locale(project.root, lang, locale, order)
+            mark_ok(project, lang, agreed)
+            mark_arbitrated(project, lang, arbitrated)
+            result.arbitrated += len(arbitrated)
+            _log(f"[{tag}] C {n}/{len(c_batches)}: agree {len(agreed)}, "
+                 f"c1 {len(arbitrated) - batch_c2}, c2 {batch_c2} "
+                 f"in {time.monotonic() - started:.1f}s")
+        # Weak heuristic, ensemble edition: a high DISAGREEMENT share is
+        # normal for two model families — weakness is the phase-A model
+        # systematically LOSING the arbitration to the ensemble model.
+        if result.error is None and not _cancel.is_set() \
+                and judged_total >= WEAK_MIN_SAMPLE \
+                and b_wins / judged_total >= WEAK_ARBITRATION_RATIO:
+            result.weak = True
+            _log(f"[{tag}] WARNING: phase-A model looks weak in {lang} "
+                 f"({round(100 * b_wins / judged_total)}% of arbitrations lost to "
+                 f"{project.ensemble_model}); consider pinning: "
+                 f"[models] \"{lang}\" = \"{project.ensemble_model}\"")
+
+    _run_phase(phased_idx, _phase_c, workers)
+
+    return [(jobs[i][0], results[i]) for i in range(len(jobs))]
+
+
+def order_jobs(jobs: list[tuple[Project, str, list[str]]]
+               ) -> list[tuple[Project, str, list[str]]]:
+    """Group jobs by their effective model ([models] overrides), models in
+    first-seen order — each model is loaded at most once per run instead of
+    swapping per language (SPEC.md §6.1: swaps are expensive on 12 GB)."""
+    first_seen: dict[str, int] = {}
+    for p, lang, _keys in jobs:
+        m = _effective_model(p, lang)
+        if m not in first_seen:
+            first_seen[m] = len(first_seen)
+    return sorted(jobs, key=lambda j: first_seen[_effective_model(j[0], j[1])])
+
+
 def run_translate_jobs(
     jobs: list[tuple[Project, str, list[str]]],
     workers: int,
@@ -230,10 +949,18 @@ def run_translate_jobs(
 ) -> list[tuple[Project, LangResult]]:
     """Run (project, lang, keys) jobs over ONE shared worker pool — in
     workspace mode (SPEC.md §14) the pool spans all modules of the run.
-    Results come back in job order."""
+    Jobs are grouped by effective model (order_jobs) to minimize model swaps.
+    Results come back in the (reordered) job order."""
     global _model_note_shown
     _model_note_shown = False  # fresh note per run
     _cancel.clear()
+    if any(p.ensemble for p, _l, _k in jobs):
+        try:
+            return _ensemble_run(jobs, workers, transport)
+        except KeyboardInterrupt:
+            _cancel.set()
+            raise TranslateInterrupted from None
+    jobs = order_jobs(jobs)
     results: list[tuple[Project, LangResult] | None] = [None] * len(jobs)
     if workers <= 1:
         try:

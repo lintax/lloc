@@ -17,6 +17,13 @@ languages = ["ru", "de"]
 [glossary]
 "EPG" = { "*" = "EPG" }
 
+# Most tests exercise translation mechanics with a dumb mock transport that
+# cannot answer judge prompts — inline semantic QA is opted out here and
+# enabled explicitly in the semantic tests (production default is "batch").
+[validation]
+semantic = "off"
+script_check = false  # mock transports emit latin pseudo-translations
+
 [ollama]
 batch_size = 3
 max_retries = 1

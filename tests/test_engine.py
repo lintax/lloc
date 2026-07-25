@@ -53,7 +53,7 @@ class TestTranslateBatch(unittest.TestCase):
         # first response loses %1$s -> validation error -> retry fixes it
         transport = MockTransport(fail_first={"playback_error": "Плейсхолдер потерян"})
         client = OllamaClient(self.project.ollama, transport=transport)
-        accepted, failed = translate_batch(
+        accepted, failed, _arb = translate_batch(
             self.project, client, "ru", list(self.project.strings), {})
         self.assertEqual(failed, {})
         self.assertEqual(len(accepted), 3)
@@ -74,7 +74,7 @@ class TestTranslateBatch(unittest.TestCase):
         transport.translator = always_bad
         transport.fail_first = {}
         client = OllamaClient(self.project.ollama, transport=transport)
-        accepted, failed = translate_batch(
+        accepted, failed, _arb = translate_batch(
             self.project, client, "ru", list(self.project.strings), {})
         self.assertIn("items_count", failed)
         self.assertEqual(len(accepted), 2)

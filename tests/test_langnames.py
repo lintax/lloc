@@ -9,9 +9,8 @@ from .helpers import L10N_TOML, make_project, make_tmpdir
 
 class TestLanguageName(unittest.TestCase):
     def test_plain_codes(self):
-        self.assertEqual(language_name("kk"), "Kazakh")
         self.assertEqual(language_name("mk"), "Macedonian")
-        self.assertEqual(language_name("ha"), "Hausa")
+        self.assertEqual(language_name("ha"), "Hausa (Latin script)")
         self.assertEqual(language_name("zu"), "Zulu")
         self.assertEqual(language_name("lo"), "Lao")
         self.assertEqual(language_name("en"), "English")
@@ -30,6 +29,21 @@ class TestLanguageName(unittest.TestCase):
     def test_script_composition(self):
         self.assertEqual(language_name("sr-Latn"), "Serbian (Latin script)")
         self.assertEqual(language_name("uz-Cyrl"), "Uzbek (Cyrillic script)")
+
+    def test_ambiguous_script_languages_pinned(self):
+        # live case: both cloud models wrote Serbian in Latin — the prompt
+        # name must pin the CLDR-default script for ambiguous-practice codes
+        self.assertEqual(language_name("sr"), "Serbian (Latin script)")  # решение пользователя
+        self.assertEqual(language_name("kk"), "Kazakh (Cyrillic script)")
+        self.assertEqual(language_name("mn"), "Mongolian (Cyrillic script)")
+        self.assertEqual(language_name("uz"), "Uzbek (Latin script)")
+        self.assertEqual(language_name("az"), "Azerbaijani (Latin script)")
+        self.assertEqual(language_name("pa"), "Punjabi (Gurmukhi script)")
+        self.assertEqual(language_name("bs"), "Bosnian (Latin script)")
+        self.assertEqual(language_name("ms"), "Malay (Latin script)")
+        # unambiguous languages stay plain
+        self.assertEqual(language_name("ru"), "Russian")
+        self.assertEqual(language_name("de"), "German")
 
     def test_legacy_android_codes(self):
         self.assertEqual(language_name("in"), "Indonesian")
