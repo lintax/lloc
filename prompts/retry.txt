@@ -1,0 +1,9 @@
+Your previous translation was rejected by automatic validation.
+
+ERROR:
+{error}
+
+Fix the issue and translate again, following all original rules.
+Output strictly the requested JSON, nothing else.
+
+{strings_block}

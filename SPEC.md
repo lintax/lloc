@@ -4,9 +4,9 @@
 Читает базовые строки + контекст из конфигов проекта, переводит только дельту,
 валидирует результат и раскладывает по форматам платформ через плагины-адаптеры.
 
-Статус: реализованы M1, M3, M4 и экспортная часть M2 (`status`, `translate`,
-`build`, `verify`; адаптер android-xml). `import` — следующий этап.
-Тесты: `python -m unittest discover -s tests -t .` (35 тестов, stdlib unittest).
+Статус: реализованы M1–M5.5 (`status`, `translate`, `build`, `verify`,
+`import` включая импорт готовых переводов; адаптер android-xml).
+Тесты: `python -m unittest discover -s tests -t .` (115 тестов, stdlib unittest).
 
 ---
 
@@ -380,7 +380,7 @@ class Adapter:
 | Этап | Содержимое | Статус |
 |---|---|---|
 | M1 | `config.py`, `hashes.py`, `store.py`, CLI-каркас, `status` | ✅ готово, тесты зелёные |
-| M2 | `android_xml.py`: `build`-экспорт ✅, `import --bootstrap-strings` ✅ (генерация strings.toml из базового values/strings.xml, translatable="false" уважается) | ⏳ остался импорт переводов из values-b+xx (адаптерный `import_()` готов и покрыт round-trip тестом) |
+| M2 | `android_xml.py`: `build`-экспорт ✅, `import --bootstrap-strings` ✅ (генерация strings.toml из базового values/strings.xml, translatable="false" уважается), импорт переводов из values-b+xx ✅ (`import`: locales/ + lock, `--assume-stale`/`--overwrite`, идемпотентен) | ✅ готово |
 | M3 | `ollama.py`, `prompts.py`, `validate.py`, `translate` | ✅ готово (реальная Ollama — прогнать локально, из dev-песочницы недоступна) |
 | M4 | `verify`, `--dry-run`/`--limit`/`--force`, `workers` | ✅ готово; JSON-отчёт (`--report`) — позже |
 | M5 | авто-консистентность терминов (§13): извлечение, few-shot приоритет, эвристика в `verify`, `verify --terms`, `translate --fix-terms`, кеш `terms/<lang>.json` | ✅ готово; **проверено на живой модели** (demo, gemma4): de унифицирован в Sender вкл. композиты Senderliste/Favoritensender, полисемия play принята во всех 4 языках, повторный `verify --terms` чист |

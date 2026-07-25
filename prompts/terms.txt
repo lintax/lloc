@@ -1,0 +1,12 @@
+You are analyzing UI translations for terminology consistency.
+Base language: {base_language}. Target language: {target_language}.
+
+The term under analysis is: "{term}"
+
+For each entry below, answer with the exact word or short phrase from the
+TRANSLATION that expresses this term in the target language. Answer with "-"
+if the term is not expressed in the translation.
+
+{entries_block}
+
+Output strictly the requested JSON (key -> word/phrase), nothing else.

@@ -138,7 +138,7 @@ python lloc.py --dir monorepo/apps/tv status        # один модуль
 | `translate` | Перевод дельты (missing + stale), чистка удалённых ключей, обновление `locales/` и lock, затем автоматически `build`. Флаги: `--force` (перевести всё заново), `--limit N`, `--dry-run` (план без запросов), `--no-build`, `--model NAME` (A/B-прогон), `--fix-terms` (авто-исправление расхождений терминологии). | да |
 | `build` | Сгенерировать файлы платформы из `locales/`: `values/strings.xml` (база) + `values-b+xx/`. Особые ключи в существующих XML сохраняются. | нет |
 | `verify` | Валидации существующих переводов, консистентность lock/locales, эвристика расхождений терминов, дубли ключей в группе. `--terms` — точная LLM-терм-карта. | только `--terms` |
-| `import` | Пока реализован `--bootstrap-strings`: генерация `strings.toml` из базового `values/strings.xml` (`--overwrite` — перезаписать). Импорт готовых переводов — следующий этап. | нет |
+| `import` | Импорт существующих переводов платформы (`values-b+xx`) в `locales/` и lock; импортированное считается актуальным (`--assume-stale` — пометить устаревшим, `--overwrite` — перезаписать имеющиеся записи в locales). `--bootstrap-strings` — генерация `strings.toml` из базового `values/strings.xml`. В workspace — только per-модуль (`--dir <member>`). | нет |
 
 Примеры:
 

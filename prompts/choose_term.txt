@@ -1,0 +1,11 @@
+APPLICATION CONTEXT:
+{app_context}
+
+The term "{term}" is currently translated into {target_language} in several
+different ways across the app UI:
+
+{variants_block}
+
+Considering the app context and all the string contexts above, choose the ONE
+variant that should be used consistently across the app. Output strictly the
+requested JSON.
