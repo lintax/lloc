@@ -261,11 +261,19 @@ def ensemble_compare(project: Project, lang: str, pairs: dict[str, tuple[str, st
     return out
 
 
+def is_resolved(entry: dict) -> bool:
+    """Arbitrated twice -> resolved: a stable disagreement between the models
+    is accepted (visible in report, overridable via `lloc set`) instead of
+    being an eternal tax re-judged on every run."""
+    return entry.get("verdict") == "arbitrated" and entry.get("attempts", 1) >= 2
+
+
 def mark_arbitrated(project: Project, lang: str,
                     items: dict[str, tuple[str, str]]) -> None:
     """Record arbitration winners: verdict "arbitrated" — NOT "ok", so they
-    never enter the trusted few-shot pool and the next semantic pass
-    re-checks them (build_semantic treats arbitrated as due)."""
+    never enter the trusted few-shot pool. Each re-arbitration of the same
+    key bumps `attempts`; after 2 the entry counts as RESOLVED (is_resolved)
+    and stops being re-judged until its text changes."""
     if not items:
         return
     data = load_semantic(project, lang)
@@ -273,9 +281,12 @@ def mark_arbitrated(project: Project, lang: str,
         base = project.strings.get(key)
         if base is None:
             continue
+        old = data["entries"].get(key, {})
+        attempts = old.get("attempts", 0) + 1 if old.get("verdict") == "arbitrated" \
+            else 1
         data["entries"][key] = {"src": _pair_hash(base.text, text),
                                 "verdict": "arbitrated", "reason": reason,
-                                "back": ""}
+                                "back": "", "attempts": attempts}
     save_semantic(project, lang, data)
 
 
@@ -308,9 +319,11 @@ def build_semantic(project: Project, lang: str, locale: dict[str, dict],
             continue
         h = _pair_hash(se.text, e["text"])
         cached = entries.get(key, {})
-        # arbitrated entries are always due: the winner was the least bad
-        # candidate, not a verified translation
-        if cached.get("src") != h or cached.get("verdict") == "arbitrated":
+        # arbitrated entries are due for a re-check — but only until they are
+        # RESOLVED (two arbitrations): stable disagreement is accepted, not
+        # re-litigated forever
+        if cached.get("src") != h \
+                or (cached.get("verdict") == "arbitrated" and not is_resolved(cached)):
             todo.append((key, h))
 
     bs = project.ollama.batch_size

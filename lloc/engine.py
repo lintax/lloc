@@ -77,7 +77,11 @@ class LangResult:
 
 
 WEAK_ARBITRATION_RATIO = 0.25  # >= 25% arbitrated -> the model looks weak here
-WEAK_MIN_SAMPLE = 8            # ...but only on a meaningful sample
+# Only on a meaningful sample of FRESH pairs (this run's phase-A output).
+# Backlog re-judging does not count: an arbitrated entry from an earlier run
+# being replaced by a new B candidate says nothing about phase-A weakness
+# (live misfire: 6 fresh strings + backlog pairs -> bogus warnings on ru/es/sv).
+WEAK_MIN_SAMPLE = 15
 
 
 def _effective_model(project: Project, lang: str) -> str:
@@ -546,7 +550,8 @@ def _run_phase(indices, fn, workers: int) -> None:
 
 
 def _ensemble_batch_language(project: Project, lang: str, keys: list[str],
-                             transport=None) -> LangResult:
+                             transport=None,
+                             include_backlog: bool = False) -> LangResult:
     """Concurrent per-batch ensemble ([validation].ensemble_concurrency =
     "batch", or "auto" with an all-cloud model trio): the phases were a
     VRAM-swap artifact — with cloud models A and B translate THE SAME batch
@@ -605,14 +610,16 @@ def _ensemble_batch_language(project: Project, lang: str, keys: list[str],
         arbitrated: dict[str, tuple[str, str]] = {}
         for k, (a_text, b_text) in pairs.items():
             v = verdicts.get(k, "c1")
-            judged_total += 1
+            if k in a_new:  # weak stats count FRESH phase-A pairs only
+                judged_total += 1
             processed.add(k)
             if v == "agree":
                 agreed[k] = locale[k]["text"] if k not in a_new else a_text
                 continue
             winner = a_text if v == "c1" else b_text
             if v == "c2":
-                b_wins += 1
+                if k in a_new:
+                    b_wins += 1
                 locale[k] = {"text": winner,
                              "src": text_hash(project.strings[k].text),
                              "model": project.ensemble_model,
@@ -668,17 +675,23 @@ def _ensemble_batch_language(project: Project, lang: str, keys: list[str],
             _log(f"{label}: +{len(acc_a) + len(b_only)} judged"
                  + (f", failed {len(result.failed)}" if result.failed else ""))
 
-        # --- leftover unverified entries from earlier runs: B + judge ----
-        entries = load_semantic(project, lang)["entries"]
+        # --- backlog (unverified/suspect/arbitrated from earlier runs) ---
+        # Re-resolved ONLY on explicit request (translate --fix-semantic /
+        # the audit cycle): a daily incremental translate touches nothing but
+        # its delta — the backlog must not be a tax on every run.
+        from .semantic import is_resolved
         due = []
-        for key, se in project.strings.items():
-            e = locale.get(key)
-            if not (e and e.get("text")) or key in processed \
-                    or e.get("model") in ("manual", "imported"):
-                continue
-            cached = entries.get(key, {})
-            if cached.get("src") != _pair_hash(se.text, e["text"]) \
-                    or cached.get("verdict") != "ok":
+        if include_backlog:
+            entries = load_semantic(project, lang)["entries"]
+            for key, se in project.strings.items():
+                e = locale.get(key)
+                if not (e and e.get("text")) or key in processed \
+                        or e.get("model") in ("manual", "imported"):
+                    continue
+                cached = entries.get(key, {})
+                if cached.get("src") == _pair_hash(se.text, e["text"]) \
+                        and (cached.get("verdict") == "ok" or is_resolved(cached)):
+                    continue  # verified, or a stable disagreement — leave alone
                 due.append(key)
         for batch in _batches(due, project.ollama.batch_size):
             if _cancel.is_set():
@@ -708,7 +721,8 @@ def _ensemble_batch_language(project: Project, lang: str, keys: list[str],
 
 def _ensemble_run(jobs: list[tuple[Project, str, list[str]]],
                   workers: int = 1,
-                  transport=None) -> list[tuple[Project, LangResult]]:
+                  transport=None,
+                  include_backlog: bool = False) -> list[tuple[Project, LangResult]]:
     """Ensemble mode (SPEC.md §13.7): every string is translated by TWO models
     with meaning-only arbitration, strictly phased to minimize model swaps
     (two models do NOT fit into 12 GB together):
@@ -743,7 +757,8 @@ def _ensemble_run(jobs: list[tuple[Project, str, list[str]]],
 
         def _batch_job(i: int) -> None:
             p, lang, keys = jobs[i]
-            results[i] = _ensemble_batch_language(p, lang, keys, transport)
+            results[i] = _ensemble_batch_language(p, lang, keys, transport,
+                                                  include_backlog=include_backlog)
 
         _run_phase(batch_idx, _batch_job, workers)
     if not phased_idx:
@@ -792,16 +807,23 @@ def _ensemble_run(jobs: list[tuple[Project, str, list[str]]],
     _run_phase(phased_idx, _phase_a, workers)
 
     # --- phase B: the ensemble model translates independently ------------
+    # Default (incremental) scope: ONLY this run's fresh delta — phase A's
+    # output. The backlog (unverified/suspect/arbitrated of earlier runs) is
+    # swept only on explicit request (--fix-semantic / audit cycle).
+    from .semantic import is_resolved
+
     b_texts: dict[int, dict[str, str]] = {}
     unverified: dict[int, list[str]] = {}
     for i in phased_idx:
-        project, lang, _keys = jobs[i]
+        project, lang, fresh_keys = jobs[i]
         if results[i].error is not None or _cancel.is_set():
             continue
         locale = load_locale(project.root, lang)
         entries = load_semantic(project, lang)["entries"]
+        scope = project.strings if include_backlog else \
+            {k: project.strings[k] for k in fresh_keys if k in project.strings}
         due = []
-        for key, se in project.strings.items():
+        for key, se in scope.items():
             e = locale.get(key)
             # machine translations only: manual fixes are human truth,
             # imported entries are live production strings — both are audited
@@ -809,11 +831,10 @@ def _ensemble_run(jobs: list[tuple[Project, str, list[str]]],
             if not (e and e.get("text")) or e.get("model") in ("manual", "imported"):
                 continue
             cached = entries.get(key, {})
-            # due = anything not judge-verified for exactly this pair:
-            # no verdict, stale hash, suspect or arbitrated
-            if cached.get("src") != _pair_hash(se.text, e["text"]) \
-                    or cached.get("verdict") != "ok":
-                due.append(key)
+            if cached.get("src") == _pair_hash(se.text, e["text"]) \
+                    and (cached.get("verdict") == "ok" or is_resolved(cached)):
+                continue  # verified or a stable (resolved) disagreement
+            due.append(key)
         unverified[i] = due
     if any(unverified.values()) and not _cancel.is_set():
         _log("=== ensemble phase B: independent second translation ===")
@@ -851,7 +872,8 @@ def _ensemble_run(jobs: list[tuple[Project, str, list[str]]],
         _log("=== ensemble phase C: meaning arbitration ===")
 
     def _phase_c(i: int) -> None:
-        project, lang, _keys = jobs[i]
+        project, lang, fresh_keys = jobs[i]
+        fresh = set(fresh_keys)  # weak stats count fresh phase-A pairs only
         texts = b_texts.get(i) or {}
         if not texts or results[i].error is not None:
             return
@@ -890,13 +912,15 @@ def _ensemble_run(jobs: list[tuple[Project, str, list[str]]],
             batch_c2 = 0
             for k in batch:
                 v = verdicts.get(k, "c1")
-                judged_total += 1
+                if k in fresh:
+                    judged_total += 1
                 if v == "agree":
                     agreed[k] = locale[k]["text"]
                     continue
                 winner = pairs[k][0] if v == "c1" else pairs[k][1]
                 if v == "c2":
-                    b_wins += 1
+                    if k in fresh:
+                        b_wins += 1
                     batch_c2 += 1
                     locale[k] = {"text": winner,
                                  "src": text_hash(project.strings[k].text),
@@ -946,6 +970,7 @@ def run_translate_jobs(
     jobs: list[tuple[Project, str, list[str]]],
     workers: int,
     transport=None,
+    include_backlog: bool = False,
 ) -> list[tuple[Project, LangResult]]:
     """Run (project, lang, keys) jobs over ONE shared worker pool — in
     workspace mode (SPEC.md §14) the pool spans all modules of the run.
@@ -956,7 +981,8 @@ def run_translate_jobs(
     _cancel.clear()
     if any(p.ensemble for p, _l, _k in jobs):
         try:
-            return _ensemble_run(jobs, workers, transport)
+            return _ensemble_run(jobs, workers, transport,
+                                 include_backlog=include_backlog)
         except KeyboardInterrupt:
             _cancel.set()
             raise TranslateInterrupted from None
@@ -1000,7 +1026,9 @@ def run_translate(
     limit: int | None = None,
     transport=None,
     retranslate_model: str | None = None,
+    include_backlog: bool = False,
 ) -> list[LangResult]:
     work = plan(project, langs, force, limit, retranslate_model)
     jobs = [(project, lang, keys) for lang, keys in work.items()]
-    return [r for _, r in run_translate_jobs(jobs, project.ollama.workers, transport)]
+    return [r for _, r in run_translate_jobs(jobs, project.ollama.workers, transport,
+                                             include_backlog=include_backlog)]

@@ -59,7 +59,9 @@ class OllamaConfig:
     max_retries: int = DEFAULT_MAX_RETRIES
     timeout_sec: int = DEFAULT_TIMEOUT_SEC
     workers: int = DEFAULT_WORKERS
-    num_ctx: int = DEFAULT_NUM_CTX
+    num_ctx: int | None = None  # None = not set explicitly: local models get
+                                # DEFAULT_NUM_CTX, cloud models get NO num_ctx
+                                # at all (the server sizes the context itself)
     prompts_dir: str | None = None
 
 
@@ -226,7 +228,7 @@ def _build_project(root: Path, cfg: dict, require_strings: bool = True) -> Proje
         max_retries=int(o.get("max_retries", DEFAULT_MAX_RETRIES)),
         timeout_sec=int(o.get("timeout_sec", DEFAULT_TIMEOUT_SEC)),
         workers=int(o.get("workers", DEFAULT_WORKERS)),
-        num_ctx=int(o.get("num_ctx", DEFAULT_NUM_CTX)),
+        num_ctx=int(o["num_ctx"]) if "num_ctx" in o else None,
         prompts_dir=o.get("prompts_dir"),
     )
     if ollama.batch_size < 1 or ollama.workers < 1:

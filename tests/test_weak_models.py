@@ -60,7 +60,7 @@ class WeakTransport:
 
 
 BIG_STRINGS = "\n".join(f'[key_{i:02d}]\ntext = "Common word number {i}"\n'
-                        for i in range(10))
+                        for i in range(20))
 
 
 class TestWeakLanguageEscalation(unittest.TestCase):
@@ -72,7 +72,7 @@ class TestWeakLanguageEscalation(unittest.TestCase):
         out = io.StringIO()
         with redirect_stdout(out):
             results = run_translate(project, ["ru"], transport=WeakTransport())
-        self.assertEqual(results[0].arbitrated, 10)   # 100% arbitrated
+        self.assertEqual(results[0].arbitrated, 20)   # 100% arbitrated
         self.assertTrue(results[0].weak)
         text = out.getvalue()
         self.assertIn("WARNING: model looks weak in ru (100% arbitrated)", text)

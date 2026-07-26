@@ -147,8 +147,10 @@ class TestEnsembleRun(unittest.TestCase):
         # the other keys agreed -> trusted
         self.assertEqual(entries["items_count"]["verdict"], "ok")
 
-    def test_suspect_entries_are_due_for_ensemble(self):
-        # empty delta + a cached suspect -> phases B/C still re-resolve it
+    def test_suspect_entries_swept_only_with_backlog_flag(self):
+        # empty delta + a cached suspect: a PLAIN translate must not touch it
+        # (incremental runs pay only for their delta); the explicit backlog
+        # sweep (--fix-semantic path) re-resolves it
         tmp = make_tmpdir(self)
         project = make_project(tmp, l10n=ENSEMBLE_TOML)
         entries = {k: {"text": f"A({k})" + _PH.get(k, ""),
@@ -159,9 +161,16 @@ class TestEnsembleRun(unittest.TestCase):
             k: {"src": _pair_hash(project.strings[k].text, entries[k]["text"]),
                 "verdict": "suspect" if k == "menu_search" else "ok",
                 "back": ""} for k in entries}})
+        # plain incremental translate: ZERO LLM calls (delta is empty)
         tr = EnsembleTransport(verdicts={"menu_search": "c2"})
-        self._run(project, tr)
-        b_keys = {k for m, kind, ks in tr.events for k in ks
+        with redirect_stdout(io.StringIO()):
+            run_translate(project, ["ru"], transport=tr)
+        self.assertEqual([e for e in tr.events if e[1] == "translate"], [])
+        # explicit backlog sweep re-resolves the suspect
+        tr2 = EnsembleTransport(verdicts={"menu_search": "c2"})
+        with redirect_stdout(io.StringIO()):
+            run_translate(project, ["ru"], transport=tr2, include_backlog=True)
+        b_keys = {k for m, kind, ks in tr2.events for k in ks
                   if kind == "translate" and m == ENS}
         self.assertEqual(b_keys, {"menu_search"})  # only the suspect was due
         self.assertEqual(load_locale(tmp, "ru")["menu_search"]["text"],
@@ -212,7 +221,7 @@ class TestEnsembleRun(unittest.TestCase):
         # all 10 keys disagree and ALL are lost to the ensemble model -> weak
         tmp = make_tmpdir(self)
         project = make_project(tmp, l10n=ENSEMBLE_TOML, strings=BIG_STRINGS)
-        tr = EnsembleTransport(verdicts={f"key_{i:02d}": "c2" for i in range(10)})
+        tr = EnsembleTransport(verdicts={f"key_{i:02d}": "c2" for i in range(20)})
         results, out = self._run(project, tr)
         self.assertTrue(results[0].weak)
         self.assertIn("of arbitrations lost to", out)
@@ -220,11 +229,38 @@ class TestEnsembleRun(unittest.TestCase):
         # ...but disagreements WON by phase A are not weakness
         tmp2 = make_tmpdir(self)
         project2 = make_project(tmp2, l10n=ENSEMBLE_TOML, strings=BIG_STRINGS)
-        tr2 = EnsembleTransport(verdicts={f"key_{i:02d}": "c1" for i in range(10)})
+        tr2 = EnsembleTransport(verdicts={f"key_{i:02d}": "c1" for i in range(20)})
         results2, out2 = self._run(project2, tr2)
         self.assertFalse(results2[0].weak)
-        self.assertEqual(results2[0].arbitrated, 10)  # 100% disagreement, no warning
+        self.assertEqual(results2[0].arbitrated, 20)  # 100% disagreement, no warning
         self.assertNotIn("looks weak", out2)
+
+    def test_backlog_rejudging_never_triggers_weak_warning(self):
+        """Live misfire: 6 fresh strings + a big arbitrated backlog -> bogus
+        'model looks weak' on 31 languages. Backlog re-judging must not feed
+        the weak stats — only fresh phase-A pairs count."""
+        from .test_weak_models import BIG_STRINGS
+        tmp = make_tmpdir(self)
+        project = make_project(tmp, l10n=ENSEMBLE_TOML, strings=BIG_STRINGS)
+        # locale fully translated, all 20 entries carry an ARBITRATED verdict
+        # (the backlog); plan delta is EMPTY
+        entries = {k: {"text": f"A({k})", "src": text_hash(e.text),
+                       "model": DEFAULT_MODEL}
+                   for k, e in project.strings.items()}
+        save_locale(tmp, "ru", entries, list(project.strings))
+        save_semantic(project, "ru", {"version": 1, "language": "ru", "entries": {
+            k: {"src": _pair_hash(project.strings[k].text, entries[k]["text"]),
+                "verdict": "arbitrated", "back": ""} for k in entries}})
+        # judge hands EVERY backlog pair to the B model -> 100% c2
+        # (explicit sweep: a plain translate would not touch the backlog)
+        tr = EnsembleTransport(verdicts={k: "c2" for k in project.strings})
+        with redirect_stdout(io.StringIO()) as out_io:
+            results = run_translate(project, ["ru"], transport=tr,
+                                    include_backlog=True)
+        out = out_io.getvalue()
+        self.assertEqual(results[0].arbitrated, 20)  # backlog was re-resolved
+        self.assertFalse(results[0].weak)            # ...but it is NOT weakness
+        self.assertNotIn("looks weak", out)
 
     def test_models_pin_overrides_phase_a(self):
         tmp = make_tmpdir(self)

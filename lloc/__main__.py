@@ -299,10 +299,12 @@ def _run_fix_semantic(project, langs) -> int:
     from .store import save_locale
 
     if project.ensemble:
-        # systemic path: suspects are unverified entries -> the ensemble
-        # phases (B: second model, C: meaning arbitration) re-resolve them
-        print("ensemble mode: re-resolving suspects via the ensemble phases")
-        results = run_translate(project, langs)
+        # systemic path: the whole backlog (unverified/suspect/arbitrated,
+        # minus resolved) is re-resolved by the ensemble phases — this is
+        # the EXPLICIT sweep; a plain translate touches only its delta
+        print("ensemble mode: re-resolving the semantic backlog via the "
+              "ensemble phases")
+        results = run_translate(project, langs, include_backlog=True)
         return 1 if any(r.error or r.failed for r in results) else 0
 
     client = OllamaClient(project.ollama)
