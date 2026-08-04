@@ -145,6 +145,26 @@ class TestInheritance(unittest.TestCase):
         self.assertEqual(mobile.languages, ["ru"])            # overrides workspace list
         self.assertEqual(mobile.ollama.model, "ws-model")     # still inherits the rest
 
+    def test_profile_inherited_and_overridable_per_member(self):
+        """The setup a monorepo picks once at the root reaches every module;
+        a module can still switch profile or a single key (SPEC.md §6.2)."""
+        from lloc.config import PROFILES, load_project
+
+        (self.tmp / "l10n" / "config.toml").write_text(
+            WS_CONFIG.replace('model = "ws-model"\n', 'profile = "local"\n'),
+            encoding="utf-8")
+        ws = load(self.tmp)
+        tv = member(ws, "apps/tv")
+        self.assertEqual(tv.ollama.profile, "local")
+        self.assertEqual(tv.ollama.model, PROFILES["local"]["model"])
+
+        cfg = self.tmp / "apps" / "mobile" / "l10n.toml"
+        cfg.write_text(cfg.read_text(encoding="utf-8")
+                       + '\n[ollama]\nmodel = "mobile-only"\n', encoding="utf-8")
+        mobile = load_project(self.tmp / "apps" / "mobile")
+        self.assertEqual(mobile.ollama.profile, "local")   # profile still inherited
+        self.assertEqual(mobile.ollama.model, "mobile-only")  # key overridden
+
     def test_dir_on_member_attaches_workspace(self):
         tv = load(self.tmp / "apps" / "tv")
         self.assertIsInstance(tv, Project)

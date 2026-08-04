@@ -6,14 +6,14 @@ import unittest
 from contextlib import redirect_stdout
 
 from lloc import engine
-from lloc.config import ConfigError, DEFAULT_MODEL
+from lloc.config import ConfigError
 from lloc.engine import run_translate
 from lloc.semantic import load_semantic, save_semantic, verified_pairs, _pair_hash
 from lloc.store import load_locale, save_locale
 from lloc.hashes import text_hash
 from lloc.prompts import select_examples
 
-from .helpers import L10N_TOML, make_project, make_tmpdir
+from .helpers import L10N_TOML, LOCAL_MODEL, make_project, make_tmpdir
 
 ENS = "ens-model"
 
@@ -94,7 +94,7 @@ class TestEnsembleRun(unittest.TestCase):
         results, out = self._run(project, tr, langs=("ru", "de"))
         # phase A translated everything with the main model, phase B with ENS
         a_keys = {k for m, kind, ks in tr.events for k in ks
-                  if kind == "translate" and m == DEFAULT_MODEL}
+                  if kind == "translate" and m == LOCAL_MODEL}
         b_keys = {k for m, kind, ks in tr.events for k in ks
                   if kind == "translate" and m == ENS}
         self.assertEqual(a_keys, set(project.strings))
@@ -102,7 +102,7 @@ class TestEnsembleRun(unittest.TestCase):
         # strict phasing: every main-model call precedes the first ENS call
         models_seq = [m for m, _kind, _ks in tr.events]
         first_ens = models_seq.index(ENS)
-        self.assertNotIn(DEFAULT_MODEL, models_seq[first_ens:])
+        self.assertNotIn(LOCAL_MODEL, models_seq[first_ens:])
         self.assertIn("phase A", out)
         self.assertIn("phase B", out)
         self.assertIn("phase C", out)
@@ -154,7 +154,7 @@ class TestEnsembleRun(unittest.TestCase):
         tmp = make_tmpdir(self)
         project = make_project(tmp, l10n=ENSEMBLE_TOML)
         entries = {k: {"text": f"A({k})" + _PH.get(k, ""),
-                       "src": text_hash(e.text), "model": DEFAULT_MODEL}
+                       "src": text_hash(e.text), "model": LOCAL_MODEL}
                    for k, e in project.strings.items()}
         save_locale(tmp, "ru", entries, list(project.strings))
         save_semantic(project, "ru", {"version": 1, "language": "ru", "entries": {
@@ -182,7 +182,7 @@ class TestEnsembleRun(unittest.TestCase):
         tr = EnsembleTransport()
 
         def hook(model, kind, keys):
-            if kind == "translate" and model == DEFAULT_MODEL:
+            if kind == "translate" and model == LOCAL_MODEL:
                 engine._cancel.set()  # interrupted right after phase A work
 
         tr.on_call = hook
@@ -210,7 +210,7 @@ class TestEnsembleRun(unittest.TestCase):
         results, _ = self._run(project, tr, langs=("ru", "de"))
         models_seq = [m for m, _k, _ in tr.events]
         first_ens = models_seq.index(ENS)
-        self.assertNotIn(DEFAULT_MODEL, models_seq[first_ens:])
+        self.assertNotIn(LOCAL_MODEL, models_seq[first_ens:])
         self.assertEqual(sum(r.translated for r in results), 6)
         for lang in ("ru", "de"):
             self.assertEqual(len(load_locale(tmp, lang)), 3)
@@ -245,7 +245,7 @@ class TestEnsembleRun(unittest.TestCase):
         # locale fully translated, all 20 entries carry an ARBITRATED verdict
         # (the backlog); plan delta is EMPTY
         entries = {k: {"text": f"A({k})", "src": text_hash(e.text),
-                       "model": DEFAULT_MODEL}
+                       "model": LOCAL_MODEL}
                    for k, e in project.strings.items()}
         save_locale(tmp, "ru", entries, list(project.strings))
         save_semantic(project, "ru", {"version": 1, "language": "ru", "entries": {

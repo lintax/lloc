@@ -17,14 +17,49 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - dev environments < 3.11 only
     import tomli as tomllib  # type: ignore
 
-DEFAULT_MODEL = "gemma4:12b-it-qat"  # A/B winner over qwen3.5:9b (see SPEC.md §6.1)
 DEFAULT_URL = "http://localhost:11434"
-DEFAULT_BATCH_SIZE = 10
 DEFAULT_MAX_RETRIES = 2
-DEFAULT_TIMEOUT_SEC = 120
-DEFAULT_WORKERS = 1
 DEFAULT_NUM_CTX = 8192
 DEFAULT_LENGTH_RATIO = 3.0
+
+# --- model profiles (SPEC.md §6.2) ---------------------------------------
+# A profile is the whole ensemble setup in one word: the three model roles
+# (A = translator, B = second opinion, C = judge) plus the throughput knobs
+# they need. Projects get the production setup without configuring anything;
+# any individual key stays overridable in l10n.toml (member wins per key).
+PROFILES: dict[str, dict] = {
+    # Production default: three independent model families in Ollama Cloud,
+    # so their blind spots do not overlap (the lv-incident: one family's
+    # judge cannot catch what that same family got wrong). Needs an Ollama
+    # Pro subscription; Pro holds three cloud models at once, so there are
+    # no swaps and the ensemble runs concurrently per batch.
+    "cloud": {
+        "model": "qwen3.5:397b-cloud",            # phase A (Qwen)
+        "ensemble_model": "deepseek-v4-flash:cloud",  # phase B (DeepSeek)
+        "semantic_model": "gpt-oss:120b-cloud",   # phase C judge (OpenAI)
+        "batch_size": 20,      # cloud models hold 256K-1M ctx: fewer round-trips
+        "timeout_sec": 600,
+        "workers": 10,         # no VRAM limit; NB concurrent ensemble keeps
+                               # 2 requests in flight per worker (A+B)
+    },
+    # Offline fallback sized for a 12 GB GPU: two local models, phased (they
+    # do not fit in VRAM together), the second translator doubles as judge.
+    "local": {
+        "model": "gemma4:12b-it-qat",   # A/B winner over qwen3.5:9b (SPEC.md §6.1)
+        "ensemble_model": "qwen3.5:9b",
+        "semantic_model": None,         # judge = the ensemble model itself
+        "batch_size": 10,
+        "timeout_sec": 120,
+        "workers": 1,
+    },
+}
+DEFAULT_PROFILE = "cloud"
+
+# Back-compat aliases: the defaults of the default profile.
+DEFAULT_MODEL = PROFILES[DEFAULT_PROFILE]["model"]
+DEFAULT_BATCH_SIZE = PROFILES[DEFAULT_PROFILE]["batch_size"]
+DEFAULT_TIMEOUT_SEC = PROFILES[DEFAULT_PROFILE]["timeout_sec"]
+DEFAULT_WORKERS = PROFILES[DEFAULT_PROFILE]["workers"]
 
 CONFIG_NAME = "l10n.toml"
 STRINGS_NAME = "strings.toml"
@@ -54,6 +89,7 @@ class StringEntry:
 @dataclass
 class OllamaConfig:
     url: str = DEFAULT_URL
+    profile: str = DEFAULT_PROFILE
     model: str = DEFAULT_MODEL
     batch_size: int = DEFAULT_BATCH_SIZE
     max_retries: int = DEFAULT_MAX_RETRIES
@@ -202,6 +238,30 @@ def _load_strings(path: Path) -> dict[str, StringEntry]:
     return strings
 
 
+def _resolve_profile(cfg: dict, where: str = CONFIG_NAME) -> tuple[str, dict]:
+    """[ollama].profile picks the built-in setup every other key overrides."""
+    name = cfg.get("ollama", {}).get("profile", DEFAULT_PROFILE)
+    if not isinstance(name, str) or name not in PROFILES:
+        raise ConfigError(f"{where}: [ollama].profile must be one of "
+                          f"{', '.join(sorted(PROFILES))}, got {name!r}")
+    return name, PROFILES[name]
+
+
+def _model_key(section: dict, key: str, default: str | None,
+               where: str, section_name: str) -> tuple[str | None, bool]:
+    """A model-name key that the profile may have preset: a name overrides it,
+    `false` switches the profile's model off. Returns (value, set_explicitly)."""
+    if key not in section:
+        return default, False
+    val = section[key]
+    if val is False:
+        return None, True
+    if not isinstance(val, str) or not val:
+        raise ConfigError(f"{where}: [{section_name}].{key} must be a model name "
+                          "or false (to disable the one from [ollama].profile)")
+    return val, True
+
+
 def _build_project(root: Path, cfg: dict, require_strings: bool = True) -> Project:
     app = cfg.get("app", {})
     languages = app.get("languages", [])
@@ -220,14 +280,16 @@ def _build_project(root: Path, cfg: dict, require_strings: bool = True) -> Proje
         if not isinstance(langs, dict):
             raise ConfigError(f"{CONFIG_NAME}: [glossary].{term!r} must be a table of lang -> translation")
 
+    profile_name, prof = _resolve_profile(cfg)
     o = cfg.get("ollama", {})
     ollama = OllamaConfig(
         url=str(o.get("url", DEFAULT_URL)).rstrip("/"),
-        model=str(o.get("model", DEFAULT_MODEL)),
-        batch_size=int(o.get("batch_size", DEFAULT_BATCH_SIZE)),
+        profile=profile_name,
+        model=str(o.get("model", prof["model"])),
+        batch_size=int(o.get("batch_size", prof["batch_size"])),
         max_retries=int(o.get("max_retries", DEFAULT_MAX_RETRIES)),
-        timeout_sec=int(o.get("timeout_sec", DEFAULT_TIMEOUT_SEC)),
-        workers=int(o.get("workers", DEFAULT_WORKERS)),
+        timeout_sec=int(o.get("timeout_sec", prof["timeout_sec"])),
+        workers=int(o.get("workers", prof["workers"])),
         num_ctx=int(o["num_ctx"]) if "num_ctx" in o else None,
         prompts_dir=o.get("prompts_dir"),
     )
@@ -249,21 +311,22 @@ def _build_project(root: Path, cfg: dict, require_strings: bool = True) -> Proje
     if semantic_mode not in ("batch", "off"):
         raise ConfigError(f'{CONFIG_NAME}: [validation].semantic must be "batch" or "off", '
                           f"got {semantic_mode!r}")
-    semantic_model = validation.get("semantic_model")
-    if semantic_model is not None and (not isinstance(semantic_model, str) or not semantic_model):
-        raise ConfigError(f"{CONFIG_NAME}: [validation].semantic_model must be a model name")
+    semantic_model, _ = _model_key(validation, "semantic_model",
+                                   prof["semantic_model"], CONFIG_NAME, "validation")
     judge_mode = str(validation.get("semantic_mode", "auto"))
     if judge_mode not in ("auto", "inline", "phased"):
         raise ConfigError(f'{CONFIG_NAME}: [validation].semantic_mode must be '
                           f'"auto", "inline" or "phased", got {judge_mode!r}')
-    ensemble_model = validation.get("ensemble_model")
-    if ensemble_model is not None:
-        if not isinstance(ensemble_model, str) or not ensemble_model:
-            raise ConfigError(f"{CONFIG_NAME}: [validation].ensemble_model "
-                              "must be a model name")
-        if semantic_mode == "off":
+    ensemble_model, ensemble_explicit = _model_key(
+        validation, "ensemble_model", prof["ensemble_model"], CONFIG_NAME, "validation")
+    if ensemble_model is not None and semantic_mode == "off":
+        # An explicit pair of contradicting keys is a config error; the same
+        # collision with a profile-provided model just means "no ensemble"
+        # (semantic = "off" is the documented way to switch the QA off).
+        if ensemble_explicit:
             raise ConfigError(f"{CONFIG_NAME}: [validation].ensemble_model requires "
                               'semantic = "batch" (ensemble is a semantic-QA mode)')
+        ensemble_model = None
     ensemble_concurrency = str(validation.get("ensemble_concurrency", "auto"))
     if ensemble_concurrency not in ("auto", "batch", "phased"):
         raise ConfigError(f'{CONFIG_NAME}: [validation].ensemble_concurrency must be '
@@ -387,7 +450,8 @@ def _load_workspace(root: Path, cfg: dict, require_strings: bool = True) -> Work
     for m in members:  # wire same-group siblings (term/few-shot boundary)
         m.siblings = [Sibling(o.module, o.root, o.strings)
                       for o in members if o is not m and o.group == m.group]
-    workers = int(cfg.get("ollama", {}).get("workers", DEFAULT_WORKERS))
+    _, prof = _resolve_profile(cfg, f"{WORKSPACE_DIR}/{WORKSPACE_CONFIG}")
+    workers = int(cfg.get("ollama", {}).get("workers", prof["workers"]))
     return Workspace(root=root, members=members, workers=max(1, workers))
 
 

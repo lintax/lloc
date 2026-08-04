@@ -11,7 +11,7 @@ from lloc.engine import run_translate
 from lloc.semantic import load_semantic
 from lloc.store import load_locale
 
-from .helpers import L10N_TOML, make_project, make_tmpdir
+from .helpers import L10N_TOML, NO_ENSEMBLE, make_project, make_tmpdir
 
 JUDGE = "tiny-judge"
 
@@ -19,7 +19,8 @@ JUDGE = "tiny-judge"
 def judged_toml(batch_size=1):
     return L10N_TOML.replace(
         'semantic = "off"',
-        f'semantic = "batch"\nsemantic_model = "{JUDGE}"\nsemantic_mode = "inline"'
+        f'semantic = "batch"\n{NO_ENSEMBLE}\nsemantic_model = "{JUDGE}"\n'
+    'semantic_mode = "inline"'
     ).replace("batch_size = 3", f"batch_size = {batch_size}")
 
 
@@ -181,7 +182,7 @@ class TestConcurrentJudge(unittest.TestCase):
         tmp = make_tmpdir(self)
         toml = L10N_TOML.replace(
             'semantic = "off"',
-            'semantic = "batch"\nsemantic_model = "big-judge"')
+            f'semantic = "batch"\n{NO_ENSEMBLE}\nsemantic_model = "big-judge"')
         project = make_project(tmp, l10n=toml)
         self.assertTrue(project.semantic_phased)
         self.assertFalse(project.semantic_inline_judge)

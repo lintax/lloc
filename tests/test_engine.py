@@ -8,7 +8,7 @@ from lloc.engine import run_translate, translate_batch
 from lloc.ollama import OllamaClient, OllamaError, string_schema
 from lloc.store import classify, load_locale, load_lock
 
-from .helpers import MockTransport, make_project, make_tmpdir
+from .helpers import LOCAL_MODEL, MockTransport, make_project, make_tmpdir
 
 
 class TestOllamaClient(unittest.TestCase):
@@ -25,8 +25,7 @@ class TestOllamaClient(unittest.TestCase):
                                   string_schema(["k"]))
         self.assertIn("k", parsed)
         self.assertEqual(json.loads(raw), parsed)
-        from lloc.config import DEFAULT_MODEL
-        self.assertEqual(transport.calls[0]["model"], DEFAULT_MODEL)
+        self.assertEqual(transport.calls[0]["model"], LOCAL_MODEL)
         self.assertFalse(transport.calls[0]["stream"])
 
     def test_invalid_json_raises(self):

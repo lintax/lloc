@@ -5,10 +5,9 @@ import re
 import unittest
 from contextlib import redirect_stdout
 
-from lloc.config import DEFAULT_MODEL
 from lloc.ollama import OllamaClient, OllamaError, string_schema
 
-from .helpers import make_project, make_tmpdir
+from .helpers import LOCAL_MODEL, make_project, make_tmpdir
 
 
 def _ok_response(keys):
@@ -18,7 +17,7 @@ def _ok_response(keys):
 class MissingThenOkTransport:
     """First chat call: 404 model not found. After a pull: success."""
 
-    def __init__(self, model=DEFAULT_MODEL, fail_forever=False):
+    def __init__(self, model=LOCAL_MODEL, fail_forever=False):
         self.model = model
         self.fail_forever = fail_forever
         self.chat_calls = 0
@@ -71,7 +70,7 @@ class TestAutoPull(unittest.TestCase):
         self.assertEqual(parsed, {"k": "tr:k"})
         self.assertEqual(self.transport.chat_calls, 2)          # 404, then success
         self.assertEqual(len(stream.calls), 1)
-        self.assertEqual(stream.calls[0], {"model": DEFAULT_MODEL, "stream": True})
+        self.assertEqual(stream.calls[0], {"model": LOCAL_MODEL, "stream": True})
         text = out.getvalue()
         self.assertIn("pulling", text)
         self.assertIn("100%", text)                             # progress was rendered
@@ -81,7 +80,7 @@ class TestAutoPull(unittest.TestCase):
         stream = PullStream(self.transport, chunks=[{"error": "pull model manifest: file does not exist"}])
         client = self._client(stream)
         with redirect_stdout(io.StringIO()):
-            with self.assertRaisesRegex(OllamaError, "ollama pull " + re.escape(DEFAULT_MODEL)) as ctx:
+            with self.assertRaisesRegex(OllamaError, "ollama pull " + re.escape(LOCAL_MODEL)) as ctx:
                 client.chat([{"role": "user", "content": "x"}], string_schema(["k"]))
         self.assertIn("file does not exist", str(ctx.exception))
 
@@ -108,7 +107,7 @@ class TestAutoPull(unittest.TestCase):
         def error_field(url, payload, timeout):
             transport.chat_calls += 1
             if not transport.pulled:
-                return {"error": f"model '{DEFAULT_MODEL}' not found, try pulling it first"}
+                return {"error": f"model '{LOCAL_MODEL}' not found, try pulling it first"}
             return _ok_response(payload["format"]["required"])
         stream = PullStream(transport)
         client = OllamaClient(self.project.ollama, transport=error_field, stream_transport=stream)

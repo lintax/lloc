@@ -10,7 +10,7 @@ from lloc.config import ConfigError
 from lloc.engine import order_jobs, run_translate
 from lloc.store import load_locale
 
-from .helpers import L10N_TOML, make_project, make_tmpdir
+from .helpers import L10N_TOML, NO_ENSEMBLE, make_project, make_tmpdir
 
 
 class TestArbitratePromptWording(unittest.TestCase):
@@ -67,7 +67,7 @@ class TestWeakLanguageEscalation(unittest.TestCase):
     def test_weak_warning_and_summary(self):
         from lloc.__main__ import _report_weak
         tmp = make_tmpdir(self)
-        toml = L10N_TOML.replace('semantic = "off"', 'semantic = "batch"')
+        toml = L10N_TOML.replace('semantic = "off"', f'semantic = "batch"\n{NO_ENSEMBLE}')
         project = make_project(tmp, l10n=toml, strings=BIG_STRINGS)
         out = io.StringIO()
         with redirect_stdout(out):

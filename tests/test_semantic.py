@@ -10,7 +10,7 @@ from lloc.semantic import (build_semantic, clear_keys, load_semantic,
                            prune_semantic_caches, suspects)
 from lloc.store import load_locale, save_locale
 
-from .helpers import make_project, make_tmpdir
+from .helpers import NO_ENSEMBLE, make_project, make_tmpdir
 
 
 class SemanticTransport:
@@ -217,7 +217,7 @@ class InlineTransport:
 def _inline_project(testcase):
     from .helpers import L10N_TOML
     tmp = make_tmpdir(testcase)
-    toml = L10N_TOML.replace('semantic = "off"', 'semantic = "batch"')
+    toml = L10N_TOML.replace('semantic = "off"', f'semantic = "batch"\n{NO_ENSEMBLE}')
     return tmp, make_project(tmp, l10n=toml)
 
 
@@ -321,7 +321,7 @@ class TestPhasedJudgeModel(unittest.TestCase):
         tmp = make_tmpdir(self)
         toml = L10N_TOML.replace(
             'semantic = "off"',
-            'semantic = "batch"\nsemantic_model = "qwen3.5:9b"')
+            f'semantic = "batch"\n{NO_ENSEMBLE}\nsemantic_model = "qwen3.5:9b"')
         project = make_project(tmp, l10n=toml)
         self.assertTrue(_phased_semantic(project))
         # inline QA must be OFF when a judge model is configured

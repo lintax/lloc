@@ -7,7 +7,7 @@ from contextlib import redirect_stdout
 
 from lloc.engine import _heartbeat, run_translate
 
-from .helpers import MockTransport, make_project, make_tmpdir
+from .helpers import LOCAL_MODEL, MockTransport, make_project, make_tmpdir
 
 
 class TestProgressOutput(unittest.TestCase):
@@ -16,9 +16,8 @@ class TestProgressOutput(unittest.TestCase):
         out = io.StringIO()
         with redirect_stdout(out):
             run_translate(project, ["ru"], transport=MockTransport())
-        from lloc.config import DEFAULT_MODEL
         lines = out.getvalue().splitlines()
-        self.assertIn(f"loading model '{DEFAULT_MODEL}' into memory, "
+        self.assertIn(f"loading model '{LOCAL_MODEL}' into memory, "
                       "first response may take a while...", lines)
         self.assertEqual(1, sum("loading model" in l for l in lines))  # printed once
         self.assertIn("[ru] batch 1/1: translating 3 strings...", lines)

@@ -5,7 +5,18 @@ import json
 import tempfile
 from pathlib import Path
 
-from lloc.config import load_project
+from lloc.config import PROFILES, load_project
+
+# The fixtures below pin [ollama].profile = "local"; assertions on "the model
+# the mock transport sees" go through this rather than through DEFAULT_MODEL
+# (which follows the production profile, currently "cloud").
+LOCAL_MODEL = PROFILES["local"]["model"]
+LOCAL_ENSEMBLE_MODEL = PROFILES["local"]["ensemble_model"]
+
+# Opt out of the profile's ensemble: tests that exercise single-model
+# mechanics (inline judge, retries, phased judge) must not get a second
+# translator behind their back.
+NO_ENSEMBLE = "ensemble_model = false"
 
 L10N_TOML = """\
 [app]
@@ -25,6 +36,9 @@ semantic = "off"
 script_check = false  # mock transports emit latin pseudo-translations
 
 [ollama]
+# Tests assert on model names and on local-only behaviour (num_ctx, phased
+# swaps), so they pin the local profile; production default is "cloud".
+profile = "local"
 batch_size = 3
 max_retries = 1
 workers = 1
