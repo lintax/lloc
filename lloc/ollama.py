@@ -178,6 +178,16 @@ def extract_json(raw: str) -> str:
     return text
 
 
+# Models that do not honour `think: false`: they reason anyway and dump the
+# reasoning into `content` ahead of the JSON (live case: glm-5.3-flash, 5-8x
+# the output tokens). A reasoning *level* is respected, so ask for the lowest.
+_THINK_LEVEL_ONLY = ("glm-",)
+
+
+def _think_value(model: str) -> bool | str:
+    return "low" if model.startswith(_THINK_LEVEL_ONLY) else False
+
+
 def string_schema(keys: list[str]) -> dict:
     """JSON schema: object with a required string property per key."""
     return {
@@ -230,7 +240,7 @@ class OllamaClient:
         if self._send_think:
             # Thinking models (qwen3.5, deepseek-r1, ...) may put everything into
             # `message.thinking` and leave `content` empty; disable thinking.
-            payload["think"] = False
+            payload["think"] = _think_value(self.cfg.model)
         try:
             resp = self._transport_throttled(f"{self.cfg.url}/api/chat", payload)
         except OllamaError as e:

@@ -28,6 +28,12 @@ class TestPayloadOptions(unittest.TestCase):
         self.assertIs(payload["think"], False)
         self.assertEqual(payload["options"]["num_ctx"], 8192)  # built-in default
 
+    def test_glm_gets_think_level_not_false(self):
+        # glm ignores think:false and leaks its reasoning into content
+        from lloc.ollama import _think_value
+        self.assertEqual(_think_value("glm-5.3-flash:cloud"), "low")
+        self.assertIs(_think_value("deepseek-v4.1-flash:cloud"), False)
+
     def test_num_ctx_configurable(self):
         from .helpers import L10N_TOML
         toml = L10N_TOML.replace("[ollama]", "[ollama]\nnum_ctx = 16384")
