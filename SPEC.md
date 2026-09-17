@@ -109,7 +109,7 @@ url = "http://localhost:11434"
 # Всё ниже опционально: без секции проект получает профиль "cloud" (§6.2) —
 # трёхмодельный облачный ансамбль. Здесь показан полный набор ключей.
 profile = "cloud"             # "cloud" (default) | "local"; см. §6.2
-model = "qwen3.5:397b-cloud"  # фаза A; см. §6.1
+model = "glm-5.3-flash:cloud"  # фаза A; см. §6.1
 batch_size = 20               # строк в одном запросе
 max_retries = 2
 timeout_sec = 600
@@ -338,8 +338,8 @@ B — второе мнение, C — судья) плюс пропускные
 
 | | `cloud` (**default**) | `local` |
 |---|---|---|
-| A: `[ollama].model` | `qwen3.5:397b-cloud` (Qwen) | `gemma4:12b-it-qat` |
-| B: `ensemble_model` | `deepseek-v4-flash:cloud` (DeepSeek) | `qwen3.5:9b` |
+| A: `[ollama].model` | `glm-5.3-flash:cloud` (Zhipu GLM) | `gemma4:12b-it-qat` |
+| B: `ensemble_model` | `deepseek-v4.1-flash:cloud` (DeepSeek) | `qwen3.5:9b` |
 | C: `semantic_model` | `gpt-oss:120b-cloud` (OpenAI) | нет → судит сама B |
 | `batch_size` | 20 | 10 |
 | `timeout_sec` | 600 | 120 |

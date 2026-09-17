@@ -34,8 +34,8 @@ PROFILES: dict[str, dict] = {
     # Pro subscription; Pro holds three cloud models at once, so there are
     # no swaps and the ensemble runs concurrently per batch.
     "cloud": {
-        "model": "qwen3.5:397b-cloud",            # phase A (Qwen)
-        "ensemble_model": "deepseek-v4-flash:cloud",  # phase B (DeepSeek)
+        "model": "glm-5.3-flash:cloud",           # phase A (Zhipu GLM)
+        "ensemble_model": "deepseek-v4.1-flash:cloud",  # phase B (DeepSeek)
         "semantic_model": "gpt-oss:120b-cloud",   # phase C judge (OpenAI)
         "batch_size": 20,      # cloud models hold 256K-1M ctx: fewer round-trips
         "timeout_sec": 600,
@@ -74,7 +74,7 @@ class ConfigError(Exception):
 
 
 def _is_cloud_tag(model: str) -> bool:
-    """Ollama Cloud tags: 'qwen3.5:397b-cloud', 'deepseek-v4-flash:cloud'."""
+    """Ollama Cloud tags: 'gpt-oss:120b-cloud', 'deepseek-v4.1-flash:cloud'."""
     return model.endswith("-cloud") or model.endswith(":cloud")
 
 

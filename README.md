@@ -326,8 +326,8 @@ with an alternate model: translate --force --lang lv --model qwen3.5:9b».
 
 | | `cloud` (**default**) | `local` |
 |---|---|---|
-| A `[ollama].model` | `qwen3.5:397b-cloud` (Qwen) | `gemma4:12b-it-qat` |
-| B `ensemble_model` | `deepseek-v4-flash:cloud` (DeepSeek) | `qwen3.5:9b` |
+| A `[ollama].model` | `glm-5.3-flash:cloud` (Zhipu GLM) | `gemma4:12b-it-qat` |
+| B `ensemble_model` | `deepseek-v4.1-flash:cloud` (DeepSeek) | `qwen3.5:9b` |
 | C `semantic_model` | `gpt-oss:120b-cloud` (OpenAI) | нет → судит сама B |
 | `batch_size` / `timeout_sec` / `workers` | 20 / 600 / 10 | 10 / 120 / 1 |
 | Ансамбль | конкурентный по батчам | пофазный (свапы VRAM) |

@@ -49,7 +49,7 @@ class TestNumCtxPolicy(unittest.TestCase):
         return seen
 
     def test_cloud_model_without_explicit_num_ctx_sends_none(self):
-        seen = self._payload("", 'model = "qwen3.5:397b-cloud"')
+        seen = self._payload("", 'model = "glm-5.3-flash:cloud"')
         self.assertNotIn("num_ctx", seen["options"])  # server decides
 
     def test_local_model_without_explicit_num_ctx_gets_default(self):
@@ -57,7 +57,7 @@ class TestNumCtxPolicy(unittest.TestCase):
         self.assertEqual(seen["options"]["num_ctx"], DEFAULT_NUM_CTX)
 
     def test_explicit_num_ctx_always_wins(self):
-        seen = self._payload("num_ctx = 16384", 'model = "qwen3.5:397b-cloud"')
+        seen = self._payload("num_ctx = 16384", 'model = "glm-5.3-flash:cloud"')
         self.assertEqual(seen["options"]["num_ctx"], 16384)
         seen = self._payload("num_ctx = 4096", 'model = "gemma4:12b-it-qat"')
         self.assertEqual(seen["options"]["num_ctx"], 4096)
