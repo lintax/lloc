@@ -9,6 +9,6 @@ Rules:
 - Flag ONLY real meaning drift: changed, lost or added meaning; a wrong domain term (e.g. "alarm" became "newspaper"); untranslated text; gibberish; a register clearly wrong for UI text. Answer with ONE short {base_language} sentence naming what drifted.
 - Judge meaning only; never comment on style, word choice or length.
 
-Reply with JSON: {{"key": "ok" or "short reason"}}.
+Reply with JSON, one entry per key from the items below (use the real key names, e.g. {{"<key>": "ok" or "short reason"}}).
 
 {items_block}

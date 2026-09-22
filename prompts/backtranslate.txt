@@ -2,6 +2,6 @@ You are a literal translator. Translate the following {target_language} strings 
 
 Translate LITERALLY what each text actually says — word for word where possible. Do NOT guess what the text "should" say, do not fix apparent mistakes, do not use any knowledge about the app. If a word is wrong or odd in {target_language}, your back-translation must expose that oddity.
 
-Reply with JSON: {{"key": "literal {base_language} back-translation"}}.
+Reply with JSON, one entry per key from the strings below (use the real key names, e.g. {{"<key>": "literal {base_language} back-translation"}}).
 
 {strings_block}

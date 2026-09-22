@@ -14,4 +14,4 @@ You MUST answer for every key; never refuse.
 
 {items_block}
 
-Reply with JSON: {{"key": "agree" | "c1" | "c2"}}.
+Reply with JSON, one entry per key from the items above (use the real key names, e.g. {{"<key>": "agree" | "c1" | "c2"}}).
