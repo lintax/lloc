@@ -20,15 +20,15 @@ class TestBatchSize(unittest.TestCase):
         tmp = make_workspace(self, {
             "l10n/config.toml": WS_CONFIG.replace("batch_size = 3",
                                                   "batch_size = 20"),
-            "apps/tv/l10n.toml":
-                'group = "player"\n\n[app]\ndescription = "TV."\n'
+            "apps/web/l10n.toml":
+                'group = "tracker"\n\n[app]\ndescription = "Web."\n'
                 "[ollama]\nbatch_size = 5\n"
                 '\n[output]\nadapter = "android-xml"\n'
                 '[output.android-xml]\nres_dir = "res"\n',
         })
         ws = load(tmp)
         self.assertEqual(member(ws, "apps/mobile").ollama.batch_size, 20)  # inherited
-        self.assertEqual(member(ws, "apps/tv").ollama.batch_size, 5)       # override
+        self.assertEqual(member(ws, "apps/web").ollama.batch_size, 5)       # override
 
 
 class TestNumCtxPolicy(unittest.TestCase):

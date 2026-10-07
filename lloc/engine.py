@@ -1,4 +1,4 @@
-"""Translation engine: delta -> batches -> Ollama -> validation -> store. SPEC.md §5-7."""
+"""Translation engine: delta -> batches -> Ollama -> validation -> store."""
 from __future__ import annotations
 
 import concurrent.futures
@@ -132,7 +132,7 @@ def translate_batch(
     bounced back into the retry loop with the judge's feedback. When retries
     are exhausted on a PURELY SEMANTIC dispute, the judge arbitrates a forced
     choice among all collected candidates — the winner lands in `accepted`
-    AND in `arbitrated` (SPEC.md §13.6); `failed` remains only for mechanics
+    AND in `arbitrated`; `failed` remains only for mechanics
     (transport errors, broken placeholders — those would break the app and
     are not a matter of taste). Costs two extra LLM calls per batch
     (~2.5-3x slower) — that is the point: safety over speed."""
@@ -150,7 +150,7 @@ def translate_batch(
         try:
             parsed, raw = client.chat(messages, schema)
         except OllamaBadResponse as e:
-            # empty/garbled reply is retryable, not fatal (SPEC.md §7)
+            # empty/garbled reply is retryable, not fatal
             last_errors = {k: [str(e)] for k in pending}
             if attempt == project.ollama.max_retries:
                 break
@@ -407,8 +407,8 @@ def _judged_translate_language(
 
         # retry cycle: main model re-translates suspects with the judge's
         # feedback, the judge re-checks synchronously; a still-standing
-        # dispute goes to arbitration — a forced choice among the candidates
-        # (SPEC.md §13.6): auto-resolve, log, never block
+        # dispute goes to arbitration — a forced choice among the candidates:
+        # auto-resolve, log, never block
         if to_retry and not _cancel.is_set():
             from .semantic import arbitrate, mark_arbitrated
 
@@ -461,7 +461,7 @@ ANCHOR_COLD_RATIO = 0.10  # cold start: fewer than 10% of strings accepted
 
 
 def _anchor_order(project: Project, keys: list[str], ok_count: int) -> list[str]:
-    """Cold-start ordering (SPEC.md §13.6): when a language is (almost) empty,
+    """Cold-start ordering: when a language is (almost) empty,
     translate ANCHORS first — one representative string per frequent term,
     picked for the richest context and the shortest text. They pass the usual
     semantic QA, so the rest of the volume sees verified anchors in few-shot
@@ -723,7 +723,7 @@ def _ensemble_run(jobs: list[tuple[Project, str, list[str]]],
                   workers: int = 1,
                   transport=None,
                   include_backlog: bool = False) -> list[tuple[Project, LangResult]]:
-    """Ensemble mode (SPEC.md §13.7): every string is translated by TWO models
+    """Ensemble mode: every string is translated by TWO models
     with meaning-only arbitration, strictly phased to minimize model swaps
     (two models do NOT fit into 12 GB together):
 
@@ -957,7 +957,7 @@ def order_jobs(jobs: list[tuple[Project, str, list[str]]]
                ) -> list[tuple[Project, str, list[str]]]:
     """Group jobs by their effective model ([models] overrides), models in
     first-seen order — each model is loaded at most once per run instead of
-    swapping per language (SPEC.md §6.1: swaps are expensive on 12 GB)."""
+    swapping per language (swaps are expensive on 12 GB)."""
     first_seen: dict[str, int] = {}
     for p, lang, _keys in jobs:
         m = _effective_model(p, lang)
@@ -973,7 +973,7 @@ def run_translate_jobs(
     include_backlog: bool = False,
 ) -> list[tuple[Project, LangResult]]:
     """Run (project, lang, keys) jobs over ONE shared worker pool — in
-    workspace mode (SPEC.md §14) the pool spans all modules of the run.
+    workspace mode the pool spans all modules of the run.
     Jobs are grouped by effective model (order_jobs) to minimize model swaps.
     Results come back in the (reordered) job order."""
     global _model_note_shown

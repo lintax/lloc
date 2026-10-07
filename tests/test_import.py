@@ -1,4 +1,4 @@
-"""`import` (full mode): existing platform translations -> locales/ + lock. SPEC.md §5, §9."""
+"""`import` (full mode): existing platform translations -> locales/ + lock."""
 import io
 import json
 import unittest
@@ -13,7 +13,7 @@ from .helpers import L10N_TOML, make_project, make_tmpdir
 
 RU_XML = """<resources>
     <string name="menu_search">Поиск</string>
-    <string name="playback_error">Не удалось открыть поток %1$s. Проверьте подключение.</string>
+    <string name="open_error">Не удалось открыть поток %1$s. Проверьте подключение.</string>
     <string name="app_key" translatable="false">com.example</string>
     <string name="legacy_key">Больше не существует в strings.toml</string>
     <string name="items_count"> </string>
@@ -50,7 +50,7 @@ class TestImportTranslations(unittest.TestCase):
         self.assertEqual(ru["menu_search"]["text"], "Поиск")
         self.assertEqual(ru["menu_search"]["src"], text_hash("Search"))
         self.assertEqual(ru["menu_search"]["model"], "imported")
-        self.assertIn("playback_error", ru)
+        self.assertIn("open_error", ru)
         # unknown, non-translatable and empty entries are skipped
         self.assertNotIn("legacy_key", ru)
         self.assertNotIn("app_key", ru)
@@ -58,7 +58,7 @@ class TestImportTranslations(unittest.TestCase):
         self.assertIn("skipped 2", out)  # legacy_key + empty; translatable="false" is invisible to the adapter
         # imported entries are ok, not stale
         st = classify(self.project, "ru")
-        self.assertEqual(sorted(st.ok), ["menu_search", "playback_error"])
+        self.assertEqual(sorted(st.ok), ["menu_search", "open_error"])
         self.assertEqual(st.orphan, [])
 
     def test_legacy_dir_maps_to_bcp47(self):
@@ -96,7 +96,7 @@ class TestImportTranslations(unittest.TestCase):
         self.assertEqual(rc, 0)
         st = classify(self.project, "ru")
         self.assertEqual(st.ok, [])
-        self.assertEqual(sorted(st.stale), ["menu_search", "playback_error"])
+        self.assertEqual(sorted(st.stale), ["menu_search", "open_error"])
 
     def test_lang_filter(self):
         rc, _ = self._run("--lang", "he")

@@ -1,97 +1,203 @@
 # lloc — LLM Localization
 
-Консольная утилита локализации приложений через **локальную LLM (Ollama)**.
-Читает базовые строки и контекст из TOML-конфигов, переводит только дельту,
-валидирует результат, следит за консистентностью терминологии и раскладывает
-переводы по форматам платформ: Android `strings.xml`, iOS `.strings`,
-плоский JSON для веба (i18next-совместимый).
+A command-line tool that localizes app strings with LLMs served by
+[Ollama](https://ollama.com). It reads base strings and their context from
+TOML, translates only what changed, validates the result, keeps terminology
+consistent and writes platform files: Android `strings.xml`, iOS `.strings`,
+flat JSON for the web (i18next-compatible).
 
-- **Zero-install**: только стандартная библиотека Python, без pip и venv.
-- **Только дельта**: переводятся отсутствующие и устаревшие строки, удалённые
-  ключи вычищаются отовсюду автоматически.
-- **Git-friendly**: все состояния — текстовые файлы с детерминированным
-  порядком ключей, коммитятся.
-- **Монорепо**: workspace-режим с наследованием настроек, группами продуктов
-  и общим пулом воркеров.
+- **Zero install**: Python standard library only, no pip, no venv.
+- **Delta only**: missing and stale strings are translated; deleted keys are
+  purged everywhere.
+- **Git-friendly**: all state is text files with deterministic key order,
+  meant to be committed.
+- **Monorepo-ready**: workspace mode with inherited settings, product groups
+  and a shared worker pool.
 
-Детали дизайна и форматов — в [SPEC.md](SPEC.md).
+## Requirements
 
-## Требования
+- **Python 3.11+** (for `tomllib`).
+- **Ollama**, only for commands that call a model: `translate`,
+  `verify --terms`, `verify --semantic`. Everything else works offline.
 
-- **Python 3.11+** (нужен `tomllib`; других зависимостей нет);
-- **[Ollama](https://ollama.com)** — только для команд, которые переводят
-  (`translate`) или строят терм-карту (`verify --terms`); `status`, `build`,
-  `verify`, `import` работают без LLM. По умолчанию используется профиль
-  `cloud` — трёхмодельный ансамбль в Ollama Cloud (нужна подписка Pro).
-  Офлайн-профиль включается одной строкой `[ollama] profile = "local"`
-  (две локальные модели, ~12 ГБ VRAM); модели при первом запуске
-  подтягиваются автоматически. См. «Профили» ниже.
+The default profile, `cloud`, runs three Ollama Cloud models and needs an
+Ollama Pro subscription. `[ollama] profile = "local"` switches to two local
+models (about 12 GB of VRAM); missing models are pulled on first use. See
+[Model profiles](#model-profiles).
 
-## Quickstart: одиночный проект
+## Quickstart: single project
 
-Каталог локализации (обычно `myapp/l10n/`) содержит два файла, которые пишет
-человек:
+The localization directory (usually `myapp/l10n/`) holds two hand-written
+files:
 
 ```toml
 # l10n.toml
 [app]
-description = "My TV app: IPTV player for Android TV"
+description = "Project tracker for small teams: boards, tasks, deadlines"
 tone = "neutral, concise UI language; formal address"
 base_language = "en"
-languages = ["ru", "de", "ja"]
+languages = ["ru", "de", "ja"]      # BCP-47
 
 [output]
 adapter = "android-xml"
 [output.android-xml]
-res_dir = "../app/src/main/res"   # пути — относительно l10n.toml
+res_dir = "../app/src/main/res"     # paths are relative to l10n.toml
 ```
-
-Про модели здесь не сказано ничего — и не нужно: проект получает профиль
-`cloud` (три модели, ансамбль с арбитражем). Секция `[ollama]` нужна, только
-если что-то из этого не подходит.
 
 ```toml
-# strings.toml — источник правды для всех строк
+# strings.toml — the source of truth for every string
 [menu_search]
 text = "Search"
-context = "Main menu item"
-type = "button"
+context = "Main menu item, opens project search"
+type = "button"                     # button | title | message
 ```
-
-Дальше:
 
 ```bash
-python lloc.py --dir myapp/l10n status       # что нужно перевести (без LLM)
-python lloc.py --dir myapp/l10n translate    # перевод дельты + build
+python lloc.py --dir myapp/l10n status       # what needs translating (no LLM)
+python lloc.py --dir myapp/l10n translate    # translate the delta, then build
 ```
 
-Если строки уже живут в Android-проекте, `strings.toml` генерируется из
-базового `values/strings.xml`:
+If the strings already live in a platform project, generate `strings.toml`
+from the base file, then import the existing translations:
 
 ```bash
 python lloc.py --dir myapp/l10n import --bootstrap-strings
+python lloc.py --dir myapp/l10n import
 ```
 
-Хранилище переводов — `locales/*.json` (пишет утилита, коммитится); XML в
-`res/` — генерируемый артефакт `build`.
+`python -m lloc` is equivalent to `python lloc.py`.
 
-## Quickstart: workspace (монорепо)
+## Files
 
-Всё workspace-уровневое живёт в одном каталоге `l10n/` в корне репозитория:
+| File | Written by | Purpose |
+|---|---|---|
+| `l10n.toml` | you | Project config: app description, tone, languages, adapter. |
+| `strings.toml` | you | Base strings: `text` (required), `context`, `type`. |
+| `locales/<lang>.json` | lloc | Canonical translation store. |
+| `l10n.lock.json` | lloc | Hashes of the base texts; its diff shows which strings changed. |
+| `terms/<lang>.json`, `semantic/<lang>.json` | lloc | Terminology and QA caches. |
+| platform files | lloc (`build`) | Generated output, never edited by hand. |
+
+Commit everything lloc writes. Add `.lloc.lock` (the run lock) to
+`.gitignore`.
+
+Each locale entry stores the translation, `src` (hash of the base text it was
+made from), `model` and `translated_at`. A key is **missing** when it has no
+entry, **stale** when `src` differs from the current hash, **orphan** when it
+is gone from `strings.toml`, and **ok** otherwise.
+
+**Plurals are not supported, by design.** Write base texts whose form does
+not depend on the number: `"Items: %d"`, not `"%d items"`. This removes a
+whole class of translation errors across languages with up to six plural
+forms. Platform plural constructs (`<plurals>`, `.stringsdict`) stay in the
+platform files and are left untouched.
+
+An optional glossary forces specific translations; `"*"` means "do not
+translate in any language":
+
+```toml
+[glossary]
+"PDF" = { "*" = "PDF" }
+"board" = { ru = "доска" }
+```
+
+## Commands
+
+Common options: `--dir PATH` (directory with `l10n.toml`, or a workspace root;
+default `.`), `--lang xx[,yy]`, `--verbose`.
+
+| Command | What it does | LLM |
+|---|---|---|
+| `status` | Table of ok / missing / stale / orphan per language. Exit code 1 if there is work. | no |
+| `translate` | Translates the delta, purges deleted keys, updates `locales/` and the lock, then runs `build`. | yes |
+| `build` | Generates platform files from `locales/`. | no |
+| `verify` | Validates existing translations: placeholders, lock consistency, terminology heuristics, script mixing, duplicate keys within a group. | `--terms`, `--semantic` |
+| `import` | Imports existing platform translations into `locales/`. Per module only in a workspace. | no |
+| `report` | Lists recently translated strings for review. `--since 90m/24h/7d` (default 24h). | no |
+| `set` | Manual fix: `set <key> --lang de "text"`. Per module only in a workspace. | no |
+
+`translate` flags:
+
+- `--dry-run` shows the plan without calling a model; `--limit N` caps strings
+  per language; `--no-build` skips the build.
+- `--force` retranslates everything, including manual entries.
+- `--model NAME` overrides the translator for an A/B run.
+- `--retranslate-model PATTERN` retranslates entries whose stored `model`
+  matches an fnmatch pattern, e.g. `"gemma3*"` or `imported`.
+- `--fix-terms` retranslates strings that diverge from the majority term.
+- `--fix-semantic` re-resolves the backlog of suspect and arbitrated entries.
+
+`import` flags: `--bootstrap-strings` generates `strings.toml` from the base
+platform file; `--assume-stale` marks imported entries as stale; `--overwrite`
+replaces entries already in `locales/`. Imported entries get
+`model = "imported"`.
+
+`verify` flags: `--terms` builds an exact LLM term map; `--semantic` audits
+meaning by back-translation. Both only warn and do not change the exit code.
+
+```bash
+python lloc.py --dir l10n translate --dry-run          # estimate the work
+python lloc.py --dir l10n translate --lang ru,de       # two languages only
+python lloc.py --dir l10n translate --force --lang ja  # redo one language
+python lloc.py --dir l10n verify --terms               # terminology audit
+```
+
+## Adapters
+
+Selected with `[output] adapter`. All adapters regenerate managed keys (those
+in `strings.toml`) on `build`, keep everything else found in existing files,
+and write atomically.
+
+```toml
+[output]
+adapter = "android-xml"             # values/ + values-b+xx/strings.xml
+[output.android-xml]
+res_dir = "../app/src/main/res"
+legacy_codes = { id = "in", he = "iw" }
+```
+
+```toml
+[output]
+adapter = "ios"                     # <lang>.lproj/Localizable.strings (UTF-8)
+[output.ios]
+lproj_dir = "../App/Resources"
+# filename = "Localizable.strings"  # default
+```
+
+```toml
+[output]
+adapter = "json"                    # one flat, key-sorted <lang>.json per language
+[output.json]
+dir = "../web/src/i18n"
+```
+
+- **android-xml**: strings marked `translatable="false"`, `<string-array>` and
+  `<plurals>` live in the XML only and survive `build`.
+- **ios**: directories are named by BCP-47 code as is (`es-419.lproj`); the
+  base language goes to `<base>.lproj`, not `Base.lproj`. `context` is written
+  as a `/* ... */` comment. `%@` and `%1$@` are validated like `%s`.
+- **json**: no nesting; dots in keys are literal.
+
+Android legacy codes (`in`, `iw`) are never used in iOS or JSON file names.
+
+## Workspace mode (monorepo)
+
+Everything workspace-level lives in one `l10n/` directory at the repository
+root; module configs stay next to the modules.
 
 ```
 monorepo/
 ├── l10n/
-│   ├── config.toml        # members + общие дефолты
-│   └── player.toml        # группа "player" (любой *.toml кроме config.toml)
-├── apps/tv/l10n.toml      # модульные конфиги — в каталогах модулей
+│   ├── config.toml        # members + shared defaults
+│   └── tracker.toml       # group "tracker" (any *.toml except config.toml)
+├── apps/web/l10n.toml
 ├── apps/mobile/l10n.toml
 └── libs/core/l10n.toml
 ```
 
 ```toml
 # l10n/config.toml
-members = ["apps/*", "libs/*"]   # явные глобы, без автосканирования
+members = ["apps/*", "libs/*"]      # explicit globs, no auto-scan
 
 [app]
 tone = "neutral, concise"
@@ -99,438 +205,227 @@ base_language = "en"
 languages = ["ru", "de"]
 
 [ollama]
-workers = 3                      # общий пул на весь прогон
+workers = 3                         # one pool for the whole run
 ```
 
 ```toml
-# l10n/player.toml — контекст продуктовой группы (редактирует команда продукта)
-context = "TinyPlayer product family: IPTV player apps and a shared core."
+# l10n/tracker.toml — product group context
+context = "Trackly product family: project tracking apps and a shared core."
 ```
 
 ```toml
-# apps/tv/l10n.toml — модуль: наследует дефолты, добавляет своё
-group = "player"
+# apps/web/l10n.toml — inherits the defaults, adds its own
+group = "tracker"
 
 [app]
-description = "TV variant; remote-control navigation."
+description = "Web variant; keyboard-first UI."
 
 [output]
-adapter = "android-xml"
-[output.android-xml]
-res_dir = "res"
-```
-
-Запуск из корня обходит все модули агрегированно; `--dir <модуль>` ограничивает
-одним модулем (наследование и группа подхватываются автоматически):
-
-```bash
-python lloc.py --dir monorepo status                # все модули
-python lloc.py --dir monorepo translate             # общий пул воркеров
-python lloc.py --dir monorepo/apps/tv status        # один модуль
-```
-
-Группа — граница консистентности: few-shot примеры и терминология не
-пересекают её; `verify` предупреждает о дублях ключей внутри группы.
-
-**Few-shot пул — только доверенные переводы** (защита от заражения ранней
-ошибкой, SPEC §13.6): примерами для промпта становятся ручные исправления
-(`manual`), записи, прошедшие semantic-судью, и импортированные боевые
-переводы — именно в таком приоритете; непроверенное в пул не попадает. При
-холодном старте языка первыми переводятся «якорные» строки (по одной
-представительной на частотный термин) — остальной объём учится терминам уже
-по проверенным якорям. Если модель и судья не сошлись после ретраев, спор
-разрешается **автоматически арбитражем**: судья обязан выбрать наименее
-плохой из накопленных кандидатов, победитель уезжает в locale с вердиктом
-`arbitrated` (в few-shot пул не попадает, следующий semantic-прогон его
-перепроверит), в консоли — `ARBITRATED key: chose … (reason)`, в `report` —
-отдельная секция для ревью. Ничего не блокируется: `failed` — только для
-механики (битые плейсхолдеры, транспорт). `lloc set` — опциональный
-override поверх любого арбитража.
-
-Терм-система безусловна (выключателя нет — decision record в SPEC §13.6):
-после доверенного пула, якорей и арбитража она не может размножить
-непроверенный выбор, а её офлайн-часть бесплатна.
-Рабочий пример: [`examples/demo-workspace`](examples/demo-workspace)
-(одиночный: [`examples/demo`](examples/demo)).
-
-## Команды
-
-Общие опции: `--dir PATH` (каталог с `l10n.toml` или корень workspace,
-по умолчанию `.`), `--lang xx[,yy]` (фильтр языков), `--verbose`.
-
-| Команда | Действие | LLM |
-|---|---|---|
-| `status` | Таблица ok / missing / stale / orphan по языкам. Exit code 1, если есть работа. | нет |
-| `translate` | Перевод дельты (missing + stale), чистка удалённых ключей, обновление `locales/` и lock, затем автоматически `build`. Флаги: `--force` (перевести всё заново), `--limit N`, `--dry-run` (план без запросов), `--no-build`, `--model NAME` (A/B-прогон), `--fix-terms` (авто-исправление расхождений терминологии), `--retranslate-model PATTERN` (пере-перевести строки, чьё сохранённое поле `model` матчит fnmatch-паттерн, например `gemma3*` или `imported`). | да |
-| `build` | Сгенерировать файлы платформы из `locales/`: `values/strings.xml` (база) + `values-b+xx/`. Особые ключи в существующих XML сохраняются. | нет |
-| `verify` | Валидации существующих переводов, консистентность lock/locales, эвристика расхождений терминов, script-mix эвристика (чужая письменность / непереведённая латиница; настройка в `[validation]`), дубли ключей в группе. `--terms` — точная LLM-терм-карта. `--semantic` — back-translation QA смысла (дорого, см. раздел ниже). | `--terms`, `--semantic` |
-| `import` | Импорт существующих переводов платформы (`values-b+xx`) в `locales/` и lock; импортированное считается актуальным (`--assume-stale` — пометить устаревшим, `--overwrite` — перезаписать имеющиеся записи в locales), `model` таких записей — `"imported"`. `--bootstrap-strings` — генерация `strings.toml` из базового `values/strings.xml`. В workspace — только per-модуль (`--dir <member>`). | нет |
-| `report` | Ревью свежепереведённого: строки с `translated_at` за последнее окно, по языкам/модулям. `--since 90m/24h/7d` (default 24h), `--last` — синоним режима по умолчанию. | нет |
-| `set` | Ручное исправление одного перевода: `set <key> --lang de "текст"` — запись в locales с `model="manual"` + инкрементальный `build` языка. Валидация как у translate; `--force-set` — принять несмотря на ошибки. В workspace — только per-модуль (`--dir <member>`). | нет |
-
-Примеры:
-
-```bash
-python lloc.py --dir l10n translate --dry-run          # оценить объём работы
-python lloc.py --dir l10n translate --lang ru,de       # только два языка
-python lloc.py --dir l10n translate --force --lang ja  # пере-перевести язык
-python lloc.py --dir l10n verify --terms               # аудит терминологии
-```
-
-`python -m lloc` эквивалентен `python lloc.py`.
-
-## Адаптеры
-
-Выбираются `[output] adapter = "..."`, у всех одна дисциплина: управляемые
-ключи (из `strings.toml`) перегенерируются при `build`, всё постороннее в
-существующих файлах сохраняется; `import` читает существующие переводы;
-запись атомарная.
-
-```toml
-[output]
-adapter = "android-xml"           # values/ + values-b+xx/strings.xml
-[output.android-xml]
-res_dir = "../app/src/main/res"   # пути — относительно l10n.toml
-legacy_codes = { id = "in", he = "iw" }
-```
-
-```toml
-[output]
-adapter = "ios"                   # <код>.lproj/Localizable.strings (UTF-8)
-[output.ios]
-lproj_dir = "../App/Resources"    # каталог с *.lproj
-# filename = "Localizable.strings"  # default
-```
-
-```toml
-[output]
-adapter = "json"                  # плоский <код>.json на язык, ключи сортированы
+adapter = "json"
 [output.json]
-dir = "../web/src/i18n"
+dir = "src/i18n"
 ```
 
-Особенности `ios`: каталоги — BCP-47 как есть (`es-419.lproj`, `pt-BR.lproj`,
-`zh-Hant.lproj`), базовый язык — `<base>.lproj` (например `en.lproj`;
-`Base.lproj` — механизм сторибордов, не строк); `context` строки пишется
-комментарием `/* ... */` над записью; плейсхолдеры `%@`/`%1$@` валидируются
-наравне с `%s`; `.stringsdict` не поддерживается: плюрали отвергнуты дизайном
-(SPEC §12) — норма: числонезависимые базовые тексты («People: %d», а не
-«1 person/5 people»). Особенности `json`: без вложенности, точки в ключах —
-литеральные. Легаси-коды Android (`in`/`iw`) в именах файлов ios/json
-не используются — конвертируются в `id`/`he`.
+```bash
+python lloc.py --dir monorepo status             # all modules
+python lloc.py --dir monorepo translate          # shared worker pool
+python lloc.py --dir monorepo/apps/web status    # one module
+```
 
-## Semantic QA — ловля смыслового брака
+Inheritance has two levels: workspace defaults, then the module, which wins
+per key. A group is the consistency boundary: few-shot examples and
+terminology are shared inside it and never cross it. `verify` warns about
+duplicate keys within a group.
 
-Форматные проверки не видят, что "Backup alarm" превратился в «резервную
-газету». Для этого есть двухпроходная проверка через back-translation:
+## How translation works
 
-1. Модель переводит перевод **обратно на базовый язык, буквально и без
-   контекста** — неверный смысл не может «починиться» знанием о приложении.
-2. Модель-судья сравнивает back-translation с оригиналом (уже с контекстом
-   ключа): `ok` или короткая причина расхождения.
+Every machine translation is produced by **two models and a judge**:
 
-**По умолчанию проверка встроена в `translate`** (`[validation] semantic =
-"batch"`): каждый батч после форматной валидации проходит back-translation +
-судью тем же моделем; suspects уходят в ретрай с фидбеком судьи (в рамках
-`max_retries`), в locale попадает только прошедшее обе проверки, остальное —
-failed. Замедление **~2.5-3x** (два лишних LLM-вызова на батч) — осознанная
-цена: безопасность важнее скорости. Отключение: `semantic = "off"`.
+1. Model A translates the delta.
+2. Model B translates the same strings independently.
+3. Judge C compares the candidates on meaning alone. Agreement gives the
+   verdict `ok`; picking one gives `arbitrated`, which is re-checked later.
 
-**Отдельная модель-судья**: `[validation] semantic_model = "..."` плюс режим
-`semantic_mode = "auto" | "inline" | "phased"`:
+One model's blind spot is covered by the other. The cost is roughly 3x a
+single-model run, which is a deliberate trade of speed for reliability.
 
-- **`"phased"`** (и `"auto"` — безопасный дефолт, двух моделей в VRAM не
-  требует): (1) весь прогон переводится основной моделью без inline-проверки,
-  (2) один свап модели — судья проверяет всё свежее, (3) свап обратно —
-  основная чинит suspects с фидбеком. Ровно два свапа на прогон, никогда —
-  на батч; для крупного судьи в 12 ГБ GPU это принципиально. Починенное
-  перепроверяется на следующем прогоне (цикл сходится через кеш).
-- **`"inline"`** (явный опт-ин: вы знаете, что судья помещается РЯДОМ с
-  основной моделью): конкурентный конвейер — основная модель переводит на
-  полной скорости, маленький судья параллельно проверяет предыдущий батч
-  (батч N переводится, пока проверяется N-1). Запись в locale — только после
-  вердикта; suspects пере-переводятся основной моделью с фидбеком судьи и
-  перепроверяются; при прерывании непроверенные батчи просто не записаны —
-  останутся pending и переведутся заново. Почти нулевая потеря скорости
-  против одиночного перевода.
+Each candidate is validated before it is judged; a failure triggers a retry
+with the specific errors, up to `max_retries`:
 
-**Размер батча** (`[ollama] batch_size`, default из профиля — 20 в облаке,
-10 локально; наследуется в workspace, применяется во всех путях — перевод,
-self-check, аудит, починка).
-Трейдофы: крупнее батч — меньше раунд-трипов на язык (актуально для облака
-с его латентностью), но грубее ретраи (провал валидации возвращает в диалог
-весь оставшийся хвост батча) и длинные списки строк чуть хуже держат
-внимание модели. Рекомендация: **10 локально, 20-30 для облака**.
-`num_ctx`: если не задан явно, локальные модели получают безопасные 8192
-(дефолт Ollama 4096 режет few-shot промпты), а облачным (`-cloud`/`:cloud`
-теги) параметр не передаётся вовсе — сервер сам распоряжается контекстом
-256K-1M класса, и жёсткие 8192 не режут крупные батчи. Явно заданный
-`num_ctx` всегда уважается для любых моделей.
+- **Placeholders**: the multiset of `%s`, `%d`, `%1$s`, `%@`, `\n` must match
+  the base text.
+- **Length**: at most `length_ratio` (default 3.0) times the base, with a
+  floor so short strings are not rejected.
+- **Cleanliness**: no reasoning, wrapping quotes or empty values.
+- **Script**: the dominant script must be the one expected for the language.
+  Disable with `[validation] script_check = false`.
 
-Для inline нужно, чтобы Ollama держала обе модели в памяти одновременно:
-проверьте `OLLAMA_MAX_LOADED_MODELS` (при нехватке Ollama начнёт свапить
-модели на каждый батч — это худший сценарий). В systemd:
-`systemctl edit ollama` → `[Service]` →
-`Environment="OLLAMA_MAX_LOADED_MODELS=2"` → `systemctl restart ollama`.
+A translation identical to the base text is not an error.
 
-**Выбор маленького судьи** (12 ГБ VRAM, основная gemma4:12b-it-qat ~7.2 ГБ +
-десктоп ⇒ свободно ~3 ГБ; состояние библиотеки Ollama на июль 2026):
+**Nothing blocks on a disagreement.** If the models and the judge still
+disagree after the retries, the judge must pick the least bad candidate. It is
+stored as `arbitrated`, printed as `ARBITRATED key: chose … (reason)` and
+listed in `report`. `failed` is reserved for mechanical problems: broken
+placeholders or transport errors. An entry arbitrated twice is treated as
+resolved until its base text changes.
 
-| Модель | Размер | Комментарий |
+**Few-shot examples come from trusted entries only**, in this priority: manual
+fixes, judge-verified translations, imported translations. Unverified output
+never becomes an example, so one early mistake cannot spread. On a cold start,
+one representative string per frequent term is translated first, and the rest
+of the language learns its terms from those.
+
+**Terminology** is extracted without markup and without an LLM: frequent words
+and bigrams of the base texts become terms, with inflections merged
+(`projects` → `project`). `verify` flags a term translated inconsistently
+within a language; `translate --fix-terms` retranslates the minority strings.
+If the model insists on its variant, the divergence is recorded as accepted
+and no longer flagged. A word listed in `[glossary]` is always its own term,
+which separates derivations such as `edit` and `editor`.
+
+`verify` also warns about **script mixing**: letters of a foreign script, or
+long untranslated Latin tokens in a non-Latin language. Tune it with
+`[validation] latin_token_max` (default 5) and `latin_allowlist`; glossary
+terms are allowed automatically.
+
+## Model profiles
+
+A profile sets all three roles and the throughput settings, so projects need
+no `[ollama]` section at all.
+
+| | `cloud` (default) | `local` |
 |---|---|---|
-| **`qwen3.5:4b`** (рекомендация) | ~2.5 ГБ (Q4) | другая семья моделей — слепые зоны наименее коррелируют с gemma4; мультиязычная линейка Qwen3.5, 256K ctx |
-| `qwen3.5:2b` | ~1.5-2 ГБ | запасной вариант при более тесном VRAM; заметно слабее на длинных фразах |
-| `gemma4:e2b-it-qat` | ~3 ГБ | влезает, но ТА ЖЕ семья, что и основная — судья наследует её слепые зоны, независимость проверки ниже |
-| `gemma4:e4b-it-qat` | ~5 ГБ | рядом с 12b в 12 ГБ уже не помещается — только для phased |
-
-```toml
-[validation]
-semantic_model = "qwen3.5:4b"
-semantic_mode = "inline"
-```
-
-Кеш `semantic/<lang>.json` (пишет утилита, коммитится) хранит вердикты по
-хешу пары база+перевод: прошедшие inline-проверку помечаются проверенными,
-повторный `translate`/аудит гоняет только дельту.
-
-**Честные ограничения**. Самопроверка тем же моделем: понимать язык проще,
-чем генерить, и back-translation без контекста не даёт модели «вспомнить»,
-что она имела в виду — класс ошибок «avīze» ловится; но систематически
-незнакомое слово модель не увидит и в роли судьи. Маленький судья: понимание
-деградирует с размером медленнее генерации (2-4B в роли судьи адекватен там,
-где как переводчик он уже плох), однако на редких языках (am, my, lo…)
-маленький судья слепнет первым.
-
-**Слабые языки — эскалация и пер-язычные модели.** Если за прогон ≥25%
-строк языка ушло в арбитраж (на выборке от 8 строк), lloc громко предупреждает
-в консоли и в `report`: «model looks weak in lv (N% arbitrated); retranslate
-with an alternate model: translate --force --lang lv --model qwen3.5:9b».
-Автосвапа модели нет (дорого по VRAM) — вместо этого язык можно закрепить за
-другой моделью в конфиге:
-
-```toml
-[models]           # per-язычные override'ы; наследуется в workspace
-"lv" = "qwen3.5:9b"
-```
-
-При переводе (включая back-translation/судью self-check-режима) такой язык
-идёт через свою модель; языки группируются по модели, чтобы каждая грузилась
-не более одного раза за прогон (свап на группу, не на язык). Явный
-`translate --model X` — это A/B-прогон и перекрывает `[models]`.
-
-## Профили: `cloud` (default) и `local`
-
-Рабочий сетап — это не одна модель, а связка ролей: A переводит, B даёт
-второе мнение, C судит. Связка задана профилем внутри утилиты, поэтому
-проекты её не настраивают — и не расходятся между собой.
-
-| | `cloud` (**default**) | `local` |
-|---|---|---|
-| A `[ollama].model` | `deepseek-v4.1-flash:cloud` (DeepSeek) | `gemma4:12b-it-qat` |
-| B `ensemble_model` | `glm-5.3-flash:cloud` (Zhipu GLM) | `qwen3.5:9b` |
-| C `semantic_model` | `gemma4:31b-cloud` (Google) | нет → судит сама B |
+| A — `[ollama] model` | `deepseek-v4.1-flash:cloud` | `gemma4:12b-it-qat` |
+| B — `[validation] ensemble_model` | `glm-5.3-flash:cloud` | `qwen3.5:9b` |
+| C — `[validation] semantic_model` | `gemma4:31b-cloud` | none: B judges |
 | `batch_size` / `timeout_sec` / `workers` | 20 / 600 / 10 | 10 / 120 / 1 |
-| Ансамбль | конкурентный по батчам | пофазный (свапы VRAM) |
+| Ensemble | concurrent per batch | phased, two model swaps per run |
 
-`cloud` требует подписки Ollama Pro (~$20/мес): три независимые семьи
-моделей — слепые зоны не пересекаются, свапов нет вовсе (Pro держит 3
-облачные модели одновременно), языки параллелятся `workers`. `local` — то же
-качество ансамбля на 12 ГБ VRAM, но вдвое-втрое медленнее и с двумя свапами
-на прогон.
+`cloud` uses three independent model families and runs A and B in parallel on
+every batch. `local` gives the same ensemble on a 12 GB GPU, two to three
+times slower.
 
 ```toml
 [ollama]
-profile = "local"     # весь офлайн-сетап одной строкой
+profile = "local"
 ```
 
-Любой отдельный ключ перекрывает профиль — в модуле или в
-workspace-дефолтах, как обычно:
+Any single key overrides the profile, in a module or in the workspace
+defaults:
 
 ```toml
 [ollama]
-workers = 4                     # облачный профиль, но спокойнее по нагрузке
+workers = 4
+batch_size = 30
 [validation]
-semantic_model = "qwen3.5:4b"   # свой судья
-ensemble_model = false          # выключить второе мнение (одна модель + self-check)
+semantic_model = "qwen3.5:4b"   # a different judge
+ensemble_model = false          # one translator plus self-check
 ```
 
-`false` убирает роль, которую дал профиль; `semantic = "off"` выключает
-семантическую QA целиком вместе с ансамблем.
+`false` removes a role the profile set. `semantic = "off"` disables semantic
+QA and the ensemble altogether.
 
-**Прямой арбитраж со сторонним судьёй** (автоматика, конфиг не нужен): если
-судья не совпадает ни с одной моделью ансамбля (третья семья), back-translation
-не нужен — сильная модель сравнивает кандидатов с оригиналом напрямую, один
-вызов на батч пар вместо трёх; output-токены (самые дорогие) срезаются в
-разы. Back-translation-путь автоматически сохраняется там, где он
-принципиален: self-check и судья, совпадающий с одной из моделей ансамбля —
-модели нельзя позволить «вспомнить», что она имела в виду. Фаза C логирует
-прогресс по батчам: `[module:lang] C 3/32: agree 7, c1 2, c2 1 in 12.4s`.
+Further settings:
 
-**Конкурентный ансамбль** (`[validation].ensemble_concurrency = "auto" |
-"batch" | "phased"`, default auto): фазы — наследие VRAM-свапов. Когда все
-три модели облачные (auto определяет по суффиксу `-cloud`/`:cloud` тега)
-или задан явный `"batch"`, A и B переводят каждый батч ПАРАЛЛЕЛЬНО двумя
-запросами, судья выносит вердикт сразу за парой, запись — только после
-вердикта (прерванный батч не оставляет полупар). Батчи и языки параллелятся
-воркерами как обычно. Осторожно: явный `"batch"` на локальных моделях
-работает, но заставляет Ollama свапить модели на каждый батч — на 12 ГБ GPU
-это худший режим из возможных; для локальных пар оставляйте `auto`/`phased`.
+- **`[models]`** pins a language to a model: `"lv" = "qwen3.5:9b"`. Languages
+  are grouped by model, so each model loads once per run. If 25% or more of a
+  language's strings go to arbitration, lloc prints `model looks weak in lv`
+  and suggests retranslating with another model.
+- **`batch_size`**: larger batches mean fewer round trips but coarser retries.
+  Use about 10 locally and 20–30 in the cloud.
+- **`num_ctx`**: unset, local models get 8192 and cloud models get no limit.
+  An explicit value is always respected.
+- **`[validation] ensemble_concurrency`** (`auto` | `batch` | `phased`):
+  `auto` runs concurrently only when all models are cloud models. Forcing
+  `batch` on local models makes Ollama swap models on every batch.
+- **`[validation] semantic_mode`** (`auto` | `inline` | `phased`), for a
+  single translator with a separate judge: `phased` translates everything,
+  swaps to the judge once, then swaps back to fix the suspects. `inline`
+  checks the previous batch while the next one is translated; it needs both
+  models in memory, so set `OLLAMA_MAX_LOADED_MODELS=2`.
 
-Free-тир покрывает только Low-usage модели (из осмысленного — gpt-oss:20b) —
-качественного апгрейда над локальной парой там нет. Будущий путь при отказе
-от подписки — прямые API по OpenAI-совместимому протоколу (DeepSeek ~$7 за
-полный прогон масштаба scilstud, Gemini Flash-класс ~$9-20): планируемая
-секция `[llm]` (`provider`/`base_url`/`api_key_env`/`model`) с fallback на
-локальную Ollama — смена провайдера строчкой конфига.
+When the judge belongs to neither translator's family, it compares the
+candidates with the original directly, in one call per batch. Otherwise it
+judges a literal back-translation made without context, so a model cannot
+"remember" what it meant.
 
-Каждый машинный перевод рождается через **две модели с арбитражем по
-смыслу** — «правильно по построению», а не «поймали и починили». На профиле
-`local` — строго пофазно (две крупные модели в 12 ГБ не совмещаются, свапов
-ровно два на прогон): фаза A — основная модель переводит дельту (результат до вердикта
-не попадает в few-shot пул); фаза B — вторая модель независимо переводит то
-же; фаза C — судья (по умолчанию вторая модель; `semantic_model` задаёт
-стороннего) сравнивает кандидатов только по верности смыслу: согласие →
-вердикт `ok` и доверенный пул, выбор одного → `arbitrated` с перепроверкой.
-Слепая зона одной модели (lv-инцидент: gemma4 не знала латышский и её же
-судья пропускал «avīze») закрывается независимым мнением второй. Цена ~3x —
-осознанная: надёжность важнее скорости.
-
-Инкрементальность честная: обычный `translate` платит только за свою дельту
-(перевод + QA свежего). Бэклог (suspect/arbitrated прошлых прогонов)
-пере-разрешается только явно — `translate --fix-semantic` или цикл
-`l10n-audit.sh`; после двух арбитражей запись становится resolved (стойкое
-несогласие принято, видно в `report`, override — `lloc set`) и больше не
-пересуживается, пока не изменится текст. `manual`/`imported` записи ансамбль не переписывает никогда
-(их аудирует только `verify --semantic`). Пер-язычные `[models]`-пины
-остаются оптимизацией: язык, где одна модель стабильно выигрывает арбитраж,
-можно закрепить за ней; эскалация «model looks weak in …» — диагностика для
-таких решений.
-
-**Альтернатива подешевле — гибрид**: маленький судья inline
-(`semantic_model = "qwen3.5:4b"`, `semantic_mode = "inline"` — ловит грубый
-брак на лету почти без потери скорости) плюс периодический аудит крупной
-моделью по слабым языкам:
+To audit existing translations with a stronger model and fix what it finds:
 
 ```bash
 python lloc.py --dir myapp/l10n verify --semantic --lang am,my,lo --model qwen3.5:9b
 python lloc.py --dir myapp/l10n translate --fix-semantic --lang am,my,lo
 ```
 
-`verify --semantic` остаётся командой аудита существующих переводов;
-suspects — предупреждения (`[lv] SUSPECT key: причина | back: "..."`),
-exit code не трогают.
+Limitation: a model judging its own family misses words that family does not
+know, and small judges fail first on rare languages.
 
-## Manual fixes — ручные исправления переводов
-
-Канонический ответ на «перевод X на язык Y кривой»:
+## Manual fixes
 
 ```bash
 python lloc.py --dir myapp/l10n set menu_search --lang de "Suchen"
 ```
 
-`set` пишет запись в `locales/de.json` с `model = "manual"`, `src` — хеш
-текущего базового текста, и сразу инкрементально перестраивает файлы этого
-языка. Плейсхолдеры валидируются как при переводе (несовпадение — ошибка;
-`--force-set` — принять осознанно).
+`set` writes the entry with `model = "manual"`, validates placeholders
+(`--force-set` accepts it anyway) and rebuilds that language.
 
-Правила игры:
+- Manual entries are the top-priority few-shot examples, so one fix pulls the
+  style of neighbouring strings along.
+- When the base text changes, a manual entry becomes stale and is
+  retranslated; `translate` reports which ones.
+- `--force` rewrites manual entries too. `--retranslate-model "gemma*"` does
+  not match them; `--retranslate-model manual` does.
+- Editing `locales/<lang>.json` by hand is valid if you set
+  `"model": "manual"`, but `set` also validates and builds.
+- Never edit generated platform files. If fixes were already made there, pull
+  them in with `import --overwrite --lang xx`.
 
-- **`--force` значит force**: переписывает всё, включая manual-записи.
-  `--retranslate-model` — честный fnmatch по полю `model`: паттерны моделей
-  (`gemma*`) manual-записи естественно не матчат, а явный
-  `--retranslate-model manual` — матчит (осознанный запрос).
-- Если **базовый текст изменился**, manual-запись становится stale и уходит
-  на пере-перевод как обычная (исправленный текст относился к старой базе);
-  `translate` явно сообщает: «N manual translation(s) were stale and
-  retranslated: ...» — стоит глянуть глазами.
-- Manual-переводы — **золотые few-shot примеры**: при отборе примеров для
-  промпта они приоритетнее обычных, т.е. одно ручное исправление подтягивает
-  стиль соседних строк при следующих переводах.
-- Прямая правка `locales/<xx>.json` руками тоже валидна (формат записи —
-  ниже; поставьте `"model": "manual"`, иначе запись не защищена) — но `set`
-  удобнее: валидация + build + метка одним вызовом.
-- Сгенерированные файлы (`res/values*/strings.xml`, `.lproj/*.strings`,
-  `<lang>.json` адаптера) по-прежнему НЕ редактируются. Если правки уже
-  сделаны в платформенных файлах — затащить их: `import --overwrite --lang xx`
-  (такие записи получают `model = "imported"`; паттерны вроде
-  `--retranslate-model "gemma*"` их не матчат — поле просто не совпадает,
-  отдельной защиты у imported нет).
+## Interrupting and rerunning
 
-Каждая запись в `locales/*.json` хранит `model` (кем переведена строка;
-у импортированных — `"imported"`) и `translated_at` (UTC ISO-8601). На них
-опираются `report` (ревью свежего) и `translate --retranslate-model`
-(пере-перевод строк конкретной модели после её смены). Записи, сделанные
-старыми версиями утилиты без этих полей, остаются валидными.
+`translate` saves the locale after every batch, so it can be interrupted at
+any point and the next run continues where it stopped. Ctrl+C stops the
+workers, prints `interrupted — progress saved, rerun to continue` and exits
+with code 130; a second Ctrl+C exits immediately.
 
-## Идемпотентность и прерывание
+All files are written atomically. Concurrent runs on one module are excluded
+by an OS lock (`.lloc.lock`) that dies with the process, so no cleanup is
+needed after a crash.
 
-Повторный запуск ничего не ломает и не делает лишней работы: переводится
-только дельта, хеши базовых текстов отслеживают устаревание. `translate`
-**пишет locale после каждого батча** — процесс можно прерывать (Ctrl+C,
-падение сети, перезагрузка) в любой момент: сделанное сохранено, следующий
-запуск продолжит с места остановки. Ctrl+C обрабатывается явно: воркеры
-останавливаются, зависшие HTTP-запросы не удерживают процесс, выводится
-«interrupted — progress saved, rerun to continue», exit code 130, лок
-снимается; второй Ctrl+C завершает немедленно. Удаление ключа из `strings.toml`
-вычищает его при следующем `translate` отовсюду: из `locales/*.json`, lock,
-терм-кешей и (через build) из всех XML; особые ключи XML при этом не
-трогаются.
+## Rules for coding agents
 
-Все хранилища (locales, lock, терм-кеши, XML) пишутся атомарно (temp-файл +
-`os.replace`): прерванная запись не оставляет полуфайлов. Параллельные
-запуски на одном модуле исключены OS-локом (`.lloc.lock` в каталоге модуля,
-`flock`/`msvcrt.locking`): второй процесс сразу получает «another lloc run
-is active for this module». Лок умирает вместе с процессом — после kill или
-падения НИКАКОЙ ручной чистки не нужно, файл на диске может оставаться
-(добавьте `.lloc.lock` в `.gitignore` проекта).
-
-## Правила для CLAUDE.md
-
-Готовый блок для `CLAUDE.md` репозитория, где используется lloc
-(путь в первой строке — плейсхолдер, поправьте под свой репо):
+A block to paste into the `CLAUDE.md` or `AGENTS.md` of a repository that uses
+lloc. Adjust the path in the first line.
 
 ```markdown
-## Локализация (lloc)
+## Localization (lloc)
 
-Утилита: `../lloc/lloc.py` относительно корня репо.
-Запуск: `python <путь>/lloc.py --dir <каталог l10n> <команда>`.
+Run: `python <path>/lloc.py --dir <l10n directory> <command>`.
 
-- **Источник правды — `strings.toml`** (+ `l10n.toml` конфиг). Сгенерированные
-  файлы руками НЕ редактировать: ни `locales/*.json`, ни `res/values*/strings.xml`,
-  ни `l10n.lock.json` — их пишет утилита, ручные правки будут перезаписаны.
-- Пользователь недоволен конкретным переводом («X на немецком звучит криво,
-  надо ...») → `set <key> --lang de "текст"`. Это ЕДИНСТВЕННЫЙ правильный
-  способ ручной правки: запись помечается `model="manual"`, валидируется,
-  сразу попадает в build и дальше служит золотым few-shot примером для
-  соседних строк. Модельные паттерны `--retranslate-model` её не матчат;
-  `--force` переписывает всё, включая manual.
-- Добавил/изменил строку в `strings.toml` → сразу заполни `context`
-  (и `type`: button / title / message) — от контекста напрямую зависит
-  качество перевода. Затем `status` — мгновенная оценка дельты без LLM.
-- Разработка НЕ ждёт переводов: после правки `strings.toml` сразу `build`
-  (офлайн: базовый файл платформы получает новые строки, локали падают на
-  базовый текст) → собирай и тестируй → `translate` фоном (по завершении
-  сам перебилдит с локалями) → перед коммитом проверь `status`.
-- `translate` инкрементален: обычный прогон после мелких правок — секунды или
-  минуты. Начальный перевод проекта или массовые операции (`--force`, новый
-  язык) — долгие: запускай их В ФОНЕ (фоновый bash / сабагент), не блокируя
-  основную работу. Это безопасно: утилита идемпотентна, сохраняет прогресс
-  после каждого батча и переживает прерывание — повторный запуск продолжит
-  с места остановки.
-- Оценить объём перед долгой операцией: `translate --dry-run`.
-- Перед релизом: `verify` (быстро, без LLM); глубокий аудит терминологии —
-  `verify --terms` (нужна Ollama).
-- Удаление ключа из `strings.toml` — это ВСЁ, что нужно для удаления строки:
-  следующий `translate` сам вычистит её из locales, lock, терм-кешей и XML.
-- Особые ключи Android (`translatable="false"`, `<string-array>`, `<plurals>`)
-  живут прямо в XML, утилитой не управляются и переживают `build` нетронутыми —
-  их редактируй в XML как обычно.
-- В монорепо с workspace-режимом (`l10n/config.toml` с `members`): команды из
-  корня обходят все модули; `--dir <модуль>` — один модуль. Терминология и
-  примеры переводов общие внутри группы модулей (`group = "..."`).
+- **`strings.toml` is the source of truth** (plus `l10n.toml`). Never edit
+  generated files by hand: `locales/*.json`, `l10n.lock.json`, platform files.
+- To fix one translation: `set <key> --lang de "text"`. This is the only
+  correct way to make a manual fix.
+- When you add or change a string in `strings.toml`, fill in `context` and
+  `type` (button / title / message): translation quality depends on them.
+  Then run `status` to see the delta.
+- Development does not wait for translations: run `build` right after editing
+  `strings.toml` (locales fall back to the base text), build and test, and run
+  `translate` in the background. Check `status` before committing.
+- `translate` is incremental and takes seconds to minutes after small edits.
+  Initial translation, `--force` and new languages are slow: run them in the
+  background. Reruns are safe and continue where the last run stopped.
+- Estimate a long run first: `translate --dry-run`.
+- Before a release: `verify` (fast, no LLM); `verify --terms` for a deeper
+  terminology audit.
+- To delete a string, delete its key from `strings.toml`. The next `translate`
+  removes it everywhere.
+- Android special keys (`translatable="false"`, `<string-array>`, `<plurals>`)
+  live in the XML, are not managed by lloc and survive `build`.
+- No plurals: write number-independent base texts such as `"Items: %d"`.
+- In a workspace (`l10n/config.toml` with `members`), commands run from the
+  root cover all modules and `--dir <module>` covers one.
 ```
 
-## Тесты
+## Tests
 
 ```bash
 python -m unittest discover -s tests -t .

@@ -1,4 +1,4 @@
-"""Human-readable language names for prompts. SPEC.md §6.
+"""Human-readable language names for prompts.
 
 LLMs reliably understand "Latin American Spanish", not "es-419": every
 {target_language}/{base_language} placeholder gets a spelled-out name.
@@ -17,7 +17,7 @@ _ALIASES = {"in": "id", "iw": "he", "ji": "yi", "tl": "fil"}
 # wrote Serbian in Latin). The prompt name pins the CLDR-default script,
 # consistent with expected_scripts() below.
 _FULL = {
-    # sr: user decision (июль 2026) — Latin is the more common practice for
+    # sr: project decision — Latin is the more common practice for
     # this audience, overriding the CLDR default (Cyrillic). sr-Cyrl subtag
     # still available for the opposite choice.
     "sr": "Serbian (Latin script)",

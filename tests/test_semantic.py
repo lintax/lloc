@@ -48,7 +48,7 @@ class TestBuildSemantic(unittest.TestCase):
         self.locale = {
             "menu_search": {"text": "Meklēt", "src": text_hash("Search")},
             # "avīze" = newspaper: the judge must flag it
-            "playback_error": {"text": "Avīzes kļūda %1$s", "src": "x"},
+            "open_error": {"text": "Avīzes kļūda %1$s", "src": "x"},
         }
         save_locale(self.tmp, "ru", self.locale, list(self.project.strings))
 
@@ -57,31 +57,31 @@ class TestBuildSemantic(unittest.TestCase):
 
     def test_backtranslate_judge_and_cache(self):
         tr = SemanticTransport(
-            back={"menu_search": "Search", "playback_error": "Newspaper error %1$s"},
+            back={"menu_search": "Search", "open_error": "Newspaper error %1$s"},
             verdict={"menu_search": "ok",
-                     "playback_error": 'the stream became a "newspaper"'})
+                     "open_error": 'the project became a "newspaper"'})
         data = build_semantic(self.project, "ru", self.locale, self._client(tr))
         self.assertEqual(data["entries"]["menu_search"]["verdict"], "ok")
         sus = suspects(data)
         self.assertEqual(len(sus), 1)
         key, reason, back = sus[0]
-        self.assertEqual(key, "playback_error")
+        self.assertEqual(key, "open_error")
         self.assertIn("newspaper", reason)
         self.assertEqual(back, "Newspaper error %1$s")
         # cache file written
         cached = json.loads(
             (self.tmp / "semantic" / "ru.json").read_text(encoding="utf-8"))
-        self.assertEqual(cached["entries"]["playback_error"]["verdict"], "suspect")
+        self.assertEqual(cached["entries"]["open_error"]["verdict"], "suspect")
         # back-translation prompt must NOT leak the key's context
         back_prompts = [p for kind, _, p in tr.calls if kind == "back"]
         self.assertTrue(back_prompts)
         self.assertNotIn("Main menu item", back_prompts[0])
-        self.assertNotIn("channel name", back_prompts[0])
+        self.assertNotIn("project name", back_prompts[0])
         # judge prompt gets the context (menu_search skipped the judge: its
         # back-translation matched the original verbatim) and instructs the
         # judge to accept synonyms/paraphrases
         judge_prompts = [p for kind, _, p in tr.calls if kind == "judge"]
-        self.assertIn("channel name", judge_prompts[0])
+        self.assertIn("project name", judge_prompts[0])
         self.assertNotIn("key: menu_search", judge_prompts[0])
         self.assertIn("Synonyms, paraphrases and natural rewording are OK",
                       judge_prompts[0])
@@ -91,12 +91,12 @@ class TestBuildSemantic(unittest.TestCase):
         # both back-translations match the originals -> zero judge calls
         tr = SemanticTransport(
             back={"menu_search": "Search",
-                  "playback_error": "Failed to open stream %1$s.  check your connection."},
+                  "open_error": "Failed to open project %1$s.  check your connection."},
             verdict={})
         data = build_semantic(self.project, "ru", self.locale, self._client(tr))
         self.assertEqual([k for k, _, _ in tr.calls], ["back"])  # no "judge"
         self.assertEqual(suspects(data), [])
-        for key in ("menu_search", "playback_error"):
+        for key in ("menu_search", "open_error"):
             self.assertEqual(data["entries"][key]["verdict"], "ok")
 
     def test_rerun_is_delta(self):
@@ -204,7 +204,7 @@ class InlineTransport:
             kind, out = "translate", {}
             retry = len(payload["messages"]) > 1
             # keep the fixture keys' placeholders so validation passes
-            ph = {"playback_error": " %1$s", "items_count": " %d"}
+            ph = {"open_error": " %1$s", "items_count": " %d"}
             for k in keys:
                 if k in self.bad and retry and not self.always_bad:
                     self.bad.discard(k)  # the retry fixes it
@@ -243,7 +243,7 @@ class TestInlineSemanticQA(unittest.TestCase):
         self.assertIn("newspaper", retry_prompt)
 
     def test_persistent_suspect_arbitrated_never_failed(self):
-        # semantic disputes auto-resolve (SPEC §13.6): after retries the judge
+        # semantic disputes auto-resolve: after retries the judge
         # makes a forced choice; the winner ships, nothing blocks
         tmp, project = _inline_project(self)
         tr = InlineTransport(bad_first={"menu_search"}, always_bad=True)
@@ -276,19 +276,19 @@ class TestInlineSemanticQA(unittest.TestCase):
         def transport(url, payload, timeout):
             resp = good(url, payload, timeout)
             kind, keys, _ = good.calls[-1]
-            if kind == "translate" and "playback_error" in keys:
+            if kind == "translate" and "open_error" in keys:
                 out = json.loads(resp["message"]["content"])
-                out["playback_error"] = "потерял плейсхолдер навсегда"
+                out["open_error"] = "потерял плейсхолдер навсегда"
                 resp = {"message": {"content": json.dumps(out, ensure_ascii=False)}}
             return resp
 
         with redirect_stdout(io.StringIO()):
             from lloc.engine import run_translate
             results = run_translate(project, ["ru"], transport=transport)
-        self.assertIn("playback_error", results[0].failed)
+        self.assertIn("open_error", results[0].failed)
         self.assertTrue(any("placeholders mismatch" in e
-                            for e in results[0].failed["playback_error"]))
-        self.assertNotIn("playback_error", load_locale(tmp, "ru"))
+                            for e in results[0].failed["open_error"]))
+        self.assertNotIn("open_error", load_locale(tmp, "ru"))
 
     def test_accepted_batches_marked_verified_in_cache(self):
         tmp, project = _inline_project(self)

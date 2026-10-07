@@ -54,7 +54,7 @@ class TwoModelTransport:
             kind = "translate"
             retry = len(payload["messages"]) > 1 or "QA judge flagged" in first
             out = {}
-            ph = {"playback_error": " %1$s", "items_count": " %d"}
+            ph = {"open_error": " %1$s", "items_count": " %d"}
             self.attempt = getattr(self, "attempt", 0) + 1
             for k in keys:
                 if k in self.bad and retry and not self.always_bad:
@@ -130,7 +130,7 @@ class TestConcurrentJudge(unittest.TestCase):
 
     def test_persistent_suspect_arbitrated_forced_choice(self):
         # the model insists, the judge keeps flagging -> the judge makes a
-        # FORCED CHOICE among the real candidates; the winner ships (SPEC §13.6)
+        # FORCED CHOICE among the real candidates; the winner ships
         tmp = make_tmpdir(self)
         project = make_project(tmp, l10n=judged_toml())
         tr = TwoModelTransport(bad={"menu_search"}, always_bad=True)

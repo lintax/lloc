@@ -1,4 +1,4 @@
-"""json adapter (flat i18next-style, file per language). SPEC.md §8.2."""
+"""json adapter (flat i18next-style, file per language)."""
 import json
 import unittest
 
@@ -43,7 +43,7 @@ class TestJsonAdapter(unittest.TestCase):
         base = json.loads((self.tmp / "i18n" / "en.json").read_text(encoding="utf-8"))
         self.assertEqual(base["menu_search"], "Search")
         # untranslated keys are omitted, not emitted empty
-        self.assertNotIn("playback_error", ru)
+        self.assertNotIn("open_error", ru)
 
     def test_export_import_roundtrip(self):
         locales = {"ru": {k: self._entry(f"[ru]{e.text}")

@@ -1,4 +1,4 @@
-"""CLI: status, translate, build, verify, import. SPEC.md §5, §14."""
+"""CLI: status, translate, build, verify, import."""
 from __future__ import annotations
 
 import argparse
@@ -46,7 +46,7 @@ def _translate_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--model", default=_S,
                    help="override the Ollama model from l10n.toml (for A/B runs)")
     p.add_argument("--fix-terms", action="store_true", default=_S,
-                   help="fix terminology divergences via re-translation (SPEC.md §13.4)")
+                   help="fix terminology divergences via re-translation")
     p.add_argument("--fix-semantic", action="store_true", default=_S,
                    help="re-translate suspects found by `verify --semantic`, telling "
                         "the model what was wrong")
@@ -64,7 +64,7 @@ def _import_flags(p: argparse.ArgumentParser) -> None:
 
 def _verify_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--terms", action="store_true", default=_S,
-                   help="build the LLM term map and report divergences (SPEC.md §13.3)")
+                   help="build the LLM term map and report divergences")
     p.add_argument("--semantic", action="store_true", default=_S,
                    help="back-translation QA: judge meaning drift per string "
                         "(expensive, two LLM passes; run selectively via --lang)")
@@ -78,7 +78,7 @@ def _report_flags(p: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="lloc", description="LLM localization tool (see SPEC.md)")
+    p = argparse.ArgumentParser(prog="lloc", description="LLM localization tool")
     _global_flags(p)
     _translate_flags(p)   # tolerate command flags before the subcommand too
     _import_flags(p)
@@ -373,7 +373,7 @@ def cmd_build(project, args) -> int:
 def cmd_verify(project, args) -> int:
     from .validate import check_translation
 
-    if args.model:  # audit with a different judge model (SPEC.md §7)
+    if args.model:  # audit with a different judge model
         project.ollama.model = args.model
     adapter = get_adapter(project)
     langs = _langs(project, args)
@@ -420,7 +420,7 @@ def cmd_verify(project, args) -> int:
 
     warn_count = 0
     # duplicate keys across modules of one group: Android merges resources
-    # silently, so this is a warning, not an error (SPEC.md §14)
+    # silently, so this is a warning, not an error
     for sib in project.siblings:
         dup = sorted(set(project.strings) & set(sib.strings))
         if dup:
@@ -453,7 +453,7 @@ def cmd_verify(project, args) -> int:
             print(f"[{lang}] pending work: {len(st.missing)} missing, "
                   f"{len(st.stale)} stale, {len(st.orphan)} orphan")
 
-        # terminology: warnings only, do not affect the exit code (SPEC.md §13.3);
+        # terminology: warnings only, do not affect the exit code;
         # aggregated per language — full list with --verbose
         TERM_WARN_CAP = 8
         if term_client is not None:
@@ -511,7 +511,7 @@ def cmd_import(project, args) -> int:
 
 
 def _import_translations(project, args) -> int:
-    """Import existing platform translations into locales/ + lock. SPEC.md §5, §9.
+    """Import existing platform translations into locales/ + lock.
 
     Reads every per-language platform file via the adapter, stores translations
     for keys known to strings.toml with src = the current base hash (they are
@@ -666,7 +666,7 @@ def _lock_ctx(project, args):
     return module_lock(project.root, label=project.module or str(project.root))
 
 
-# --- workspace mode (SPEC.md §14) ----------------------------------------
+# --- workspace mode ----------------------------------------
 
 def _member_langs(member, args) -> list[str]:
     if not args.lang:

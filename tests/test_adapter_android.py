@@ -50,7 +50,7 @@ class TestAdapter(unittest.TestCase):
         return {
             "ru": {
                 "menu_search": entry("Поиск"),
-                "playback_error": entry("Не удалось открыть поток %1$s. Проверьте подключение."),
+                "open_error": entry("Не удалось открыть поток %1$s. Проверьте подключение."),
                 "items_count": entry("Элементов: %d"),
             },
             "he": {"menu_search": entry("חיפוש")},
@@ -65,14 +65,14 @@ class TestAdapter(unittest.TestCase):
         self.assertTrue(content.startswith("<resources>"))
         # missing translations are skipped, not emitted empty
         he = (self.tmp / "res" / "values-b+iw" / "strings.xml").read_text(encoding="utf-8")
-        self.assertNotIn("playback_error", he)
+        self.assertNotIn("open_error", he)
 
     def test_export_import_roundtrip(self):
         locales = self._locales()
         self.adapter.export(locales)
         imported = self.adapter.import_()
-        self.assertEqual(imported["ru"]["playback_error"],
-                         locales["ru"]["playback_error"]["text"])
+        self.assertEqual(imported["ru"]["open_error"],
+                         locales["ru"]["open_error"]["text"])
         self.assertEqual(imported["he"]["menu_search"], "חיפוש")
 
     def test_check_valid(self):
@@ -105,7 +105,7 @@ SPECIAL_XML = """<resources>
 
 
 class TestSpecialKeys(unittest.TestCase):
-    """SPEC §8.1: special keys are skipped on import and kept on build."""
+    """special keys are skipped on import and kept on build."""
 
     def setUp(self):
         self.tmp = make_tmpdir(self)

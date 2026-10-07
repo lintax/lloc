@@ -20,13 +20,13 @@ NO_ENSEMBLE = "ensemble_model = false"
 
 L10N_TOML = """\
 [app]
-description = "Demo TV app"
+description = "Demo app"
 tone = "neutral, concise"
 base_language = "en"
 languages = ["ru", "de"]
 
 [glossary]
-"EPG" = { "*" = "EPG" }
+"PDF" = { "*" = "PDF" }
 
 # Most tests exercise translation mechanics with a dumb mock transport that
 # cannot answer judge prompts — inline semantic QA is opted out here and
@@ -57,9 +57,9 @@ text = "Search"
 context = "Main menu item"
 type = "button"
 
-[playback_error]
-text = "Failed to open stream %1$s. Check your connection."
-context = "Error message; %1$s is the channel name"
+[open_error]
+text = "Failed to open project %1$s. Check your connection."
+context = "Error message; %1$s is the project name"
 type = "message"
 
 [items_count]

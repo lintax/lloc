@@ -1,4 +1,4 @@
-"""Translation store (locales/*.json), lock file, delta computation. SPEC.md §4.3-4.4."""
+"""Translation store (locales/*.json), lock file, delta computation."""
 from __future__ import annotations
 
 import json

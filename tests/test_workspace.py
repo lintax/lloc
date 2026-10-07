@@ -1,4 +1,4 @@
-"""Workspace mode for monorepos (SPEC.md §14): discovery, inheritance,
+"""Workspace mode for monorepos: discovery, inheritance,
 groups, group-scoped terms/few-shot, duplicate keys, aggregated CLI."""
 import io
 import unittest
@@ -29,7 +29,7 @@ workers = 2
 model = "ws-model"
 """
 
-GROUP_PLAYER = 'context = "TinyPlayer product family: IPTV player apps and a shared core."\n'
+GROUP_TRACKER = 'context = "Trackly product family: project tracking apps and a shared core."\n'
 
 MEMBER_OUTPUT = """
 [output]
@@ -38,39 +38,39 @@ adapter = "android-xml"
 res_dir = "res"
 """
 
-TV_CFG = 'group = "player"\n\n[app]\ndescription = "TV variant; remote-control UI."\n' \
+WEB_CFG = 'group = "tracker"\n\n[app]\ndescription = "Web variant; keyboard-first UI."\n' \
          + MEMBER_OUTPUT
-MOBILE_CFG = 'group = "player"\n\n[app]\ndescription = "Mobile variant."\n' \
+MOBILE_CFG = 'group = "tracker"\n\n[app]\ndescription = "Mobile variant."\n' \
              'languages = ["ru"]\n' + MEMBER_OUTPUT
-CORE_CFG = 'group = "player"\n\n[app]\ndescription = "Shared playback core."\n' + MEMBER_OUTPUT
+CORE_CFG = 'group = "tracker"\n\n[app]\ndescription = "Shared sync core."\n' + MEMBER_OUTPUT
 SOLO_CFG = '[app]\ndescription = "Unrelated tool."\n' + MEMBER_OUTPUT
 
-TV_STRINGS = """\
-[channel_open]
-text = "Open the channel"
-[channel_next]
-text = "Next channel"
-[tv_hello]
+WEB_STRINGS = """\
+[project_open]
+text = "Open the project"
+[project_next]
+text = "Next project"
+[web_hello]
 text = "Welcome"
 """
 MOBILE_STRINGS = '[mob_hello]\ntext = "Welcome back"\n'
-CORE_STRINGS = '[core_lock]\ntext = "Channel is locked"\n'
+CORE_STRINGS = '[core_lock]\ntext = "Project is locked"\n'
 SOLO_STRINGS = """\
 [solo_a]
-text = "Open the channel"
+text = "Open the project"
 [solo_b]
-text = "Next channel"
+text = "Next project"
 """
 
 
 def make_workspace(testcase, files=None):
-    """Monorepo: l10n/config.toml + l10n/player.toml + 3 apps + 1 lib."""
+    """Monorepo: l10n/config.toml + l10n/tracker.toml + 3 apps + 1 lib."""
     tmp = make_tmpdir(testcase)
     defaults = {
         "l10n/config.toml": WS_CONFIG,
-        "l10n/player.toml": GROUP_PLAYER,
-        "apps/tv/l10n.toml": TV_CFG,
-        "apps/tv/strings.toml": TV_STRINGS,
+        "l10n/tracker.toml": GROUP_TRACKER,
+        "apps/web/l10n.toml": WEB_CFG,
+        "apps/web/strings.toml": WEB_STRINGS,
         "apps/mobile/l10n.toml": MOBILE_CFG,
         "apps/mobile/strings.toml": MOBILE_STRINGS,
         "apps/solo/l10n.toml": SOLO_CFG,
@@ -97,7 +97,7 @@ class TestDiscovery(unittest.TestCase):
         ws = load(make_workspace(self))
         self.assertIsInstance(ws, Workspace)
         self.assertEqual([m.module for m in ws.members],
-                         ["apps/mobile", "apps/solo", "apps/tv", "libs/core"])
+                         ["apps/mobile", "apps/solo", "apps/web", "libs/core"])
         self.assertEqual(ws.workers, 2)
 
     def test_pattern_without_members_is_error(self):
@@ -108,7 +108,7 @@ class TestDiscovery(unittest.TestCase):
 
     def test_nested_workspace_forbidden(self):
         tmp = make_workspace(self, {
-            "apps/tv/l10n.toml": 'members = ["x/*"]\n' + TV_CFG})
+            "apps/web/l10n.toml": 'members = ["x/*"]\n' + WEB_CFG})
         with self.assertRaisesRegex(ConfigError, "nested workspaces"):
             load(tmp)
 
@@ -133,12 +133,12 @@ class TestInheritance(unittest.TestCase):
         self.ws = load(self.tmp)
 
     def test_defaults_inherited(self):
-        tv = member(self.ws, "apps/tv")
-        self.assertEqual(tv.languages, ["ru", "de"])
-        self.assertEqual(tv.tone, "neutral, concise")
-        self.assertEqual(tv.ollama.model, "ws-model")
-        self.assertEqual(tv.ollama.batch_size, 3)
-        self.assertEqual(tv.description, "TV variant; remote-control UI.")
+        web = member(self.ws, "apps/web")
+        self.assertEqual(web.languages, ["ru", "de"])
+        self.assertEqual(web.tone, "neutral, concise")
+        self.assertEqual(web.ollama.model, "ws-model")
+        self.assertEqual(web.ollama.batch_size, 3)
+        self.assertEqual(web.description, "Web variant; keyboard-first UI.")
 
     def test_member_overrides(self):
         mobile = member(self.ws, "apps/mobile")
@@ -147,16 +147,16 @@ class TestInheritance(unittest.TestCase):
 
     def test_profile_inherited_and_overridable_per_member(self):
         """The setup a monorepo picks once at the root reaches every module;
-        a module can still switch profile or a single key (SPEC.md §6.2)."""
+        a module can still switch profile or a single key."""
         from lloc.config import PROFILES, load_project
 
         (self.tmp / "l10n" / "config.toml").write_text(
             WS_CONFIG.replace('model = "ws-model"\n', 'profile = "local"\n'),
             encoding="utf-8")
         ws = load(self.tmp)
-        tv = member(ws, "apps/tv")
-        self.assertEqual(tv.ollama.profile, "local")
-        self.assertEqual(tv.ollama.model, PROFILES["local"]["model"])
+        web = member(ws, "apps/web")
+        self.assertEqual(web.ollama.profile, "local")
+        self.assertEqual(web.ollama.model, PROFILES["local"]["model"])
 
         cfg = self.tmp / "apps" / "mobile" / "l10n.toml"
         cfg.write_text(cfg.read_text(encoding="utf-8")
@@ -166,15 +166,15 @@ class TestInheritance(unittest.TestCase):
         self.assertEqual(mobile.ollama.model, "mobile-only")  # key overridden
 
     def test_dir_on_member_attaches_workspace(self):
-        tv = load(self.tmp / "apps" / "tv")
-        self.assertIsInstance(tv, Project)
-        self.assertEqual(tv.module, "apps/tv")
-        self.assertEqual(tv.group, "player")
-        self.assertEqual(tv.languages, ["ru", "de"])          # inherited via parent walk
-        self.assertEqual(sorted(s.module for s in tv.siblings),
+        web = load(self.tmp / "apps" / "web")
+        self.assertIsInstance(web, Project)
+        self.assertEqual(web.module, "apps/web")
+        self.assertEqual(web.group, "tracker")
+        self.assertEqual(web.languages, ["ru", "de"])          # inherited via parent walk
+        self.assertEqual(sorted(s.module for s in web.siblings),
                          ["apps/mobile", "libs/core"])
         # load_project entry point behaves the same (used by tests/tools)
-        self.assertEqual(load_project(self.tmp / "apps" / "tv").group, "player")
+        self.assertEqual(load_project(self.tmp / "apps" / "web").group, "tracker")
 
 
 class TestGroups(unittest.TestCase):
@@ -183,8 +183,8 @@ class TestGroups(unittest.TestCase):
         self.ws = load(self.tmp)
 
     def test_group_context_from_l10n_dir(self):
-        tv = member(self.ws, "apps/tv")
-        self.assertIn("TinyPlayer product family", tv.group_context)
+        web = member(self.ws, "apps/web")
+        self.assertIn("Trackly product family", web.group_context)
 
     def test_module_without_group_is_own_group(self):
         solo = member(self.ws, "apps/solo")
@@ -200,14 +200,14 @@ class TestGroups(unittest.TestCase):
 
     def test_layered_prompt_context(self):
         from lloc.prompts import build_translate_prompt
-        tv = member(self.ws, "apps/tv")
+        web = member(self.ws, "apps/web")
         prompt = build_translate_prompt(
-            tv, "ru", [tv.strings["channel_open"]], {})
-        self.assertIn("TinyPlayer product family", prompt)     # group context
-        self.assertIn("TV variant; remote-control UI.", prompt)  # module context
+            web, "ru", [web.strings["project_open"]], {})
+        self.assertIn("Trackly product family", prompt)     # group context
+        self.assertIn("Web variant; keyboard-first UI.", prompt)  # module context
         self.assertIn("neutral, concise", prompt)              # workspace tone
-        pos_group = prompt.find("TinyPlayer product family")
-        pos_module = prompt.find("TV variant")
+        pos_group = prompt.find("Trackly product family")
+        pos_module = prompt.find("Web variant")
         self.assertLess(pos_group, pos_module)                 # group before module
 
 
@@ -218,31 +218,31 @@ class TestGroupBoundaries(unittest.TestCase):
 
     def test_terms_counted_group_wide(self):
         from lloc.terms import extract_terms
-        # tv alone has "channel" in 2 strings (< min_occurrences=3); the core
+        # web alone has "project" in 2 strings (< min_occurrences=3); the core
         # sibling adds the 3rd -> term exists, keys stay module-local
-        tv = member(self.ws, "apps/tv")
-        terms = extract_terms(tv)
-        self.assertIn("channel", terms)
-        self.assertEqual(terms["channel"], ["channel_open", "channel_next"])
+        web = member(self.ws, "apps/web")
+        terms = extract_terms(web)
+        self.assertIn("project", terms)
+        self.assertEqual(terms["project"], ["project_open", "project_next"])
 
     def test_other_group_is_isolated(self):
         from lloc.terms import extract_terms
-        # solo also has "channel" in 2 strings, but no same-group sibling
+        # solo also has "project" in 2 strings, but no same-group sibling
         solo = member(self.ws, "apps/solo")
-        self.assertNotIn("channel", extract_terms(solo))
+        self.assertNotIn("project", extract_terms(solo))
 
     def test_fewshot_from_sibling_locale(self):
         from lloc.prompts import select_examples
         core = member(self.ws, "libs/core")
-        # trusted-only pool (SPEC §13.6): the sibling's entry must be trusted
+        # trusted-only pool: the sibling's entry must be trusted
         save_locale(core.root, "ru",
-                    {"core_lock": {"text": "Канал заблокирован",
-                                   "src": text_hash("Channel is locked"),
+                    {"core_lock": {"text": "Проект заблокирован",
+                                   "src": text_hash("Project is locked"),
                                    "model": "imported"}},
                     ["core_lock"])
-        tv = member(self.ws, "apps/tv")
-        examples = select_examples(tv, [tv.strings["channel_open"]], {}, lang="ru")
-        self.assertIn(("Channel is locked", "Канал заблокирован"), examples)
+        web = member(self.ws, "apps/web")
+        examples = select_examples(web, [web.strings["project_open"]], {}, lang="ru")
+        self.assertIn(("Project is locked", "Проект заблокирован"), examples)
         # solo (different group) never sees it
         solo = member(self.ws, "apps/solo")
         self.assertEqual(
@@ -250,12 +250,12 @@ class TestGroupBoundaries(unittest.TestCase):
 
     def test_duplicate_keys_in_group_warn_in_verify(self):
         tmp = make_workspace(self, {
-            "libs/core/strings.toml": CORE_STRINGS + '[channel_open]\ntext = "Open"\n'})
+            "libs/core/strings.toml": CORE_STRINGS + '[project_open]\ntext = "Open"\n'})
         out = io.StringIO()
         with redirect_stdout(out):
             main(["--dir", str(tmp), "verify"])
         self.assertIn('duplicate keys with module "libs/core"', out.getvalue())
-        self.assertIn("channel_open", out.getvalue())
+        self.assertIn("project_open", out.getvalue())
 
     def test_no_duplicate_warning_when_clean(self):
         out = io.StringIO()
@@ -276,15 +276,15 @@ class TestWorkspaceCli(unittest.TestCase):
 
     def test_status_aggregated(self):
         rc, out = self._run("status")
-        for header in ("=== apps/tv (group: player) ===",
+        for header in ("=== apps/web (group: tracker) ===",
                        "=== apps/solo (group: apps/solo) ===",
-                       "=== libs/core (group: player) ==="):
+                       "=== libs/core (group: tracker) ==="):
             self.assertIn(header, out)
         self.assertEqual(rc, 1)                                # everything missing
 
     def test_lang_filter_skips_members_without_language(self):
         rc, out = self._run("status", "--lang", "de")
-        self.assertIn("apps/tv", out)
+        self.assertIn("apps/web", out)
         self.assertNotIn("apps/mobile", out)                   # mobile is ru-only
         rc, out = self._run("status", "--lang", "xx")
         self.assertEqual(rc, 2)
@@ -294,7 +294,7 @@ class TestWorkspaceCli(unittest.TestCase):
         rc, out = self._run("translate", "--dry-run")
         self.assertEqual(rc, 0)
         # languages with an identical pending keyset collapse into one line
-        self.assertIn("[apps/tv] all 3 keys → 2 languages (ru, de)", out)
+        self.assertIn("[apps/web] all 3 keys → 2 languages (ru, de)", out)
         self.assertIn("[libs/core] all 1 keys → 2 languages (ru, de)", out)
         self.assertIn("[apps/mobile] all 1 keys → ru", out)
         self.assertIn("no requests made", out)
@@ -302,14 +302,14 @@ class TestWorkspaceCli(unittest.TestCase):
     def test_translate_dry_run_partial_keysets_split_groups(self):
         # de is fully translated except one key -> its own group; ru needs all
         ws = load(self.tmp)
-        tv = member(ws, "apps/tv")
+        web = member(ws, "apps/web")
         entries = {k: {"text": f"[de]{e.text}", "src": text_hash(e.text)}
-                   for k, e in tv.strings.items() if k != "tv_hello"}
-        save_locale(tv.root, "de", entries, list(tv.strings))
+                   for k, e in web.strings.items() if k != "web_hello"}
+        save_locale(web.root, "de", entries, list(web.strings))
         rc, out = self._run("translate", "--dry-run")
         self.assertEqual(rc, 0)
-        self.assertIn("[apps/tv] all 3 keys → ru", out)
-        self.assertIn("[apps/tv] 1 key (tv_hello) → de", out)
+        self.assertIn("[apps/web] all 3 keys → ru", out)
+        self.assertIn("[apps/web] 1 key (web_hello) → de", out)
 
     def test_import_requires_module_dir(self):
         rc, out = self._run("import", "--bootstrap-strings")
@@ -344,11 +344,11 @@ class TestWorkspaceCli(unittest.TestCase):
             results = run_translate_jobs(jobs, workers=ws.workers, transport=transport)
         self.assertEqual(len(results), len(jobs))
         self.assertTrue(all(r.error is None for _, r in results))
-        tv = member(ws, "apps/tv")
-        self.assertEqual(load_locale(tv.root, "ru")["tv_hello"]["text"], "[ru]Welcome")
+        web = member(ws, "apps/web")
+        self.assertEqual(load_locale(web.root, "ru")["web_hello"]["text"], "[ru]Welcome")
         core = member(ws, "libs/core")
         self.assertEqual(load_locale(core.root, "de")["core_lock"]["text"],
-                         "[de]Channel is locked")
+                         "[de]Project is locked")
 
 
 if __name__ == "__main__":

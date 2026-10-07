@@ -1,4 +1,4 @@
-"""Ensemble mode (SPEC §13.7): two models translate every string, a judge
+"""Ensemble mode: two models translate every string, a judge
 arbitrates by meaning; strictly phased for minimal model swaps."""
 import io
 import json
@@ -20,7 +20,7 @@ ENS = "ens-model"
 ENSEMBLE_TOML = L10N_TOML.replace(
     'semantic = "off"', f'semantic = "batch"\nensemble_model = "{ENS}"')
 
-_PH = {"playback_error": " %1$s", "items_count": " %d"}
+_PH = {"open_error": " %1$s", "items_count": " %d"}
 
 
 class EnsembleTransport:
@@ -123,7 +123,7 @@ class TestEnsembleRun(unittest.TestCase):
         tmp = make_tmpdir(self)
         project = make_project(tmp, l10n=ENSEMBLE_TOML)
         tr = EnsembleTransport(b_same=set(L10N_KEYS := ["menu_search",
-                                                        "playback_error",
+                                                        "open_error",
                                                         "items_count"]))
         self._run(project, tr)
         # identical pairs: no judge calls at all

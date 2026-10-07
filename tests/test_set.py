@@ -42,7 +42,7 @@ class TestSetCommand(unittest.TestCase):
         self.assertFalse((self.tmp / "res" / "values-b+de").exists())
 
     def test_set_validates_placeholders(self):
-        rc, out = run_cli("--dir", str(self.tmp), "set", "playback_error",
+        rc, out = run_cli("--dir", str(self.tmp), "set", "open_error",
                           "Потерял плейсхолдер", "--lang", "ru")
         self.assertEqual(rc, 1)
         self.assertIn("placeholders mismatch", out)
@@ -50,10 +50,10 @@ class TestSetCommand(unittest.TestCase):
         self.assertEqual(load_locale(self.tmp, "ru"), {})  # nothing written
 
     def test_force_set_overrides_validation(self):
-        rc, out = run_cli("--dir", str(self.tmp), "set", "playback_error",
+        rc, out = run_cli("--dir", str(self.tmp), "set", "open_error",
                           "Без плейсхолдера", "--lang", "ru", "--force-set")
         self.assertEqual(rc, 0)
-        self.assertEqual(load_locale(self.tmp, "ru")["playback_error"]["model"], "manual")
+        self.assertEqual(load_locale(self.tmp, "ru")["open_error"]["model"], "manual")
 
     def test_errors(self):
         rc, out = run_cli("--dir", str(self.tmp), "set", "nope", "x", "--lang", "ru")
@@ -174,7 +174,7 @@ class TestSetWorkspaceGuard(unittest.TestCase):
     def test_set_from_workspace_root_requires_dir(self):
         from .test_workspace import make_workspace
         tmp = make_workspace(self)
-        rc, out = run_cli("--dir", str(tmp), "set", "channel_open", "x", "--lang", "ru")
+        rc, out = run_cli("--dir", str(tmp), "set", "project_open", "x", "--lang", "ru")
         self.assertEqual(rc, 2)
         self.assertIn("use --dir <member>", out)
 

@@ -1,7 +1,7 @@
 """End-to-end orphan cleanup: deleting a string from strings.toml + one
 translate run removes it from locales/*.json, l10n.lock.json, terms/<lang>.json
 and (via the automatic build) from every generated XML — while preserved
-special keys in the XML stay untouched (SPEC.md §4.4, §8.1, §13.3)."""
+special keys in the XML stay untouched."""
 import io
 import json
 import unittest
@@ -15,14 +15,14 @@ from lloc.store import load_locale, load_lock, save_locale
 from .helpers import L10N_TOML, make_tmpdir
 
 STRINGS_V1 = """\
-[channel_open]
-text = "Open the channel"
-[channel_list]
-text = "All the channels"
-[channel_lock]
-text = "The channel is locked"
+[project_open]
+text = "Open the project"
+[project_list]
+text = "All the projects"
+[project_lock]
+text = "The project is locked"
 [obsolete]
-text = "Old channel banner"
+text = "Old project banner"
 """
 STRINGS_V2 = "\n".join(STRINGS_V1.splitlines()[:6]) + "\n"  # [obsolete] removed
 
@@ -47,8 +47,8 @@ class TestOrphanCleanup(unittest.TestCase):
         (self.tmp / "terms" / "ru.json").write_text(json.dumps({
             "version": 1, "language": "ru",
             "terms": {
-                "channel": {k: {"src": "x", "tr": "канал"}
-                            for k in ("channel_open", "channel_lock", "obsolete")},
+                "project": {k: {"src": "x", "tr": "проект"}
+                            for k in ("project_open", "project_lock", "obsolete")},
                 "deadterm": {"obsolete": {"src": "x", "tr": "старый"}},
             },
             "accepted": {"deadterm": ["старый", "древний"]},
@@ -75,7 +75,7 @@ class TestOrphanCleanup(unittest.TestCase):
         self.assertNotIn("obsolete", load_lock(self.tmp))              # lock
 
         data = json.loads((self.tmp / "terms" / "ru.json").read_text(encoding="utf-8"))
-        self.assertNotIn("obsolete", data["terms"]["channel"])         # key pruned
+        self.assertNotIn("obsolete", data["terms"]["project"])         # key pruned
         self.assertNotIn("deadterm", data["terms"])                    # dead term pruned
         self.assertNotIn("deadterm", data["accepted"])                 # accepted pruned
 

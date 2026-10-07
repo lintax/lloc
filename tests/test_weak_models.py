@@ -54,7 +54,7 @@ class WeakTransport:
         elif "QA judge" in first:
             out = {k: "gibberish" for k in keys}
         else:
-            ph = {"playback_error": " %1$s", "items_count": " %d"}
+            ph = {"open_error": " %1$s", "items_count": " %d"}
             out = {k: f"tr({k})" + ph.get(k, "") for k in keys}
         return {"message": {"content": json.dumps(out, ensure_ascii=False)}}
 
@@ -124,7 +124,7 @@ class TestPerLanguageModels(unittest.TestCase):
             keys = payload["format"]["required"]
             lang_models = models_seen.setdefault(payload["model"], set())
             lang_models.update(keys)
-            ph = {"playback_error": " %1$s", "items_count": " %d"}
+            ph = {"open_error": " %1$s", "items_count": " %d"}
             return {"message": {"content": json.dumps(
                 {k: f"tr({k})" + ph.get(k, "") for k in keys})}}
 
@@ -153,7 +153,7 @@ class TestPerLanguageModels(unittest.TestCase):
         from lloc.config import load
         files = {"l10n/config.toml": WS_CONFIG + '\n[models]\n"ru" = "alt-ru"\n'}
         ws = load(make_workspace(self, files))
-        self.assertEqual(member(ws, "apps/tv").models, {"ru": "alt-ru"})
+        self.assertEqual(member(ws, "apps/web").models, {"ru": "alt-ru"})
 
     def test_cli_model_flag_beats_models_section(self):
         import unittest.mock

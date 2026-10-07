@@ -1,4 +1,4 @@
-"""Canonical hash of a base string. See SPEC.md §4.3."""
+"""Canonical hash of a base string."""
 import hashlib
 
 

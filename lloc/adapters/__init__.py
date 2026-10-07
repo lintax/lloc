@@ -1,4 +1,4 @@
-"""Adapter registry. SPEC.md §8."""
+"""Adapter registry."""
 from __future__ import annotations
 
 from ..config import ConfigError, Project

@@ -1,4 +1,4 @@
-"""Prompt templates and few-shot example selection. SPEC.md §6."""
+"""Prompt templates and few-shot example selection."""
 from __future__ import annotations
 
 import re
@@ -67,13 +67,13 @@ def select_examples(
     project: Project, batch: list[StringEntry], locale: dict[str, dict],
     limit: int = 8, lang: str | None = None,
 ) -> list[tuple[str, str]]:
-    """Pick already-translated strings for few-shot (SPEC.md §6, §13.2, §13.6):
+    """Pick already-translated strings for few-shot:
     strings sharing extracted *terms* with the batch score far above mere
-    word overlap. In workspace mode (SPEC.md §14) accepted translations of
+    word overlap. In workspace mode accepted translations of
     same-group sibling modules are candidates too (pass `lang`); the group is
     the boundary — other groups never contribute. Returns [(base, translated)].
 
-    The pool is TRUSTED-ONLY (SPEC.md §13.6): manual fixes, judge-verified
+    The pool is TRUSTED-ONLY: manual fixes, judge-verified
     entries (semantic/<lang>.json verdict ok for exactly this base+translation
     pair) and imported production translations, ranked in that order.
     Unverified entries (e.g. translated with semantic="off") never become
@@ -139,7 +139,7 @@ def build_translate_prompt(
         examples = extra_note + "\n\n" + examples
     return render(
         template,
-        # layered context (SPEC.md §14): group context -> module description
+        # layered context: group context -> module description
         app_context=project.full_context,
         tone=project.tone or "neutral",
         base_language=language_name(project.base_language),

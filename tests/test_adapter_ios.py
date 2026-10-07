@@ -1,4 +1,4 @@
-"""ios adapter (.strings / <lang>.lproj). SPEC.md §8.2."""
+"""ios adapter (.strings / <lang>.lproj)."""
 import unittest
 
 from lloc.adapters import get_adapter
@@ -54,7 +54,7 @@ class TestIosAdapter(unittest.TestCase):
     def test_export_import_roundtrip(self):
         locales = {"ru": {
             "menu_search": self._entry("Поиск"),
-            "playback_error": self._entry('Не удалось открыть "поток" %1$s.\nПроверьте.'),
+            "open_error": self._entry('Не удалось открыть "поток" %1$s.\nПроверьте.'),
         }}
         self.adapter.export(locales)
         f = self.tmp / "Resources" / "ru.lproj" / "Localizable.strings"
@@ -62,8 +62,8 @@ class TestIosAdapter(unittest.TestCase):
         self.assertIn('"menu_search" = "Поиск";', content)
         self.assertIn("/* Main menu item */", content)  # context as comment
         imported = self.adapter.import_()
-        self.assertEqual(imported["ru"]["playback_error"],
-                         locales["ru"]["playback_error"]["text"])
+        self.assertEqual(imported["ru"]["open_error"],
+                         locales["ru"]["open_error"]["text"])
 
     def test_base_language_lproj(self):
         self.adapter.export({})

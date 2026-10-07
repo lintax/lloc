@@ -1,4 +1,4 @@
-"""Adapter interface. SPEC.md §8."""
+"""Adapter interface."""
 from __future__ import annotations
 
 from ..config import Project

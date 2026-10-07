@@ -1,4 +1,4 @@
-"""Reliability hardening (SPEC §13.6): trusted-only few-shot pool,
+"""Reliability hardening: trusted-only few-shot pool,
 anchor-first cold start, conflict escalation."""
 import unittest
 
@@ -92,15 +92,15 @@ class TestTrustedPool(unittest.TestCase):
 
 
 ANCHOR_STRINGS = """\
-[channel_rich]
-text = "Open channel"
-context = "Button on the player screen; opens the currently highlighted channel"
+[project_rich]
+text = "Open project"
+context = "Button on the main screen; opens the currently highlighted project"
 
-[channel_poor]
-text = "The channel could not be loaded, check the connection and try again"
+[project_poor]
+text = "The project could not be loaded, check the connection and try again"
 
-[channel_mid]
-text = "Channel list"
+[project_mid]
+text = "Project list"
 context = "Screen title"
 
 [misc_hello]
@@ -115,7 +115,7 @@ text = "Yes"
 
 
 class TestTermsAlwaysOn(unittest.TestCase):
-    """Decision record (SPEC §13.6): the term system is unconditional — the
+    """Decision record: the term system is unconditional — the
     former [terms].enabled kill switch was removed. Setting it is a config
     error with a pointer to the decision, and anchors always apply."""
 
@@ -129,15 +129,15 @@ class TestTermsAlwaysOn(unittest.TestCase):
         # `enabled = true` is equally rejected: the key itself is gone
         tmp2 = make_tmpdir(self)
         toml = L10N_TOML + "\n[terms]\nenabled = true\n"
-        with self.assertRaisesRegex(ConfigError, "SPEC.md §13.6"):
+        with self.assertRaisesRegex(ConfigError, "always on"):
             make_project(tmp2, l10n=toml, strings=ANCHOR_STRINGS)
 
     def test_terms_and_anchors_unconditional(self):
         from lloc.terms import text_terms
         tmp = make_tmpdir(self)
         project = make_project(tmp, strings=ANCHOR_STRINGS)  # no [terms] section
-        self.assertEqual(text_terms(project, "Open channel now"), {"channel"})
-        self.assertEqual(plan(project, ["ru"], False, None)["ru"][0], "channel_rich")
+        self.assertEqual(text_terms(project, "Open project now"), {"project"})
+        self.assertEqual(plan(project, ["ru"], False, None)["ru"][0], "project_rich")
 
 
 class TestAnchorColdStart(unittest.TestCase):
@@ -149,9 +149,9 @@ class TestAnchorColdStart(unittest.TestCase):
         work = plan(self.project, ["ru"], force=False, limit=None)
         keys = work["ru"]
         self.assertEqual(set(keys), set(self.project.strings))
-        # "channel" is the frequent term; its representative (richest context,
+        # "project" is the frequent term; its representative (richest context,
         # then shortest text) leads the plan
-        self.assertEqual(keys[0], "channel_rich")
+        self.assertEqual(keys[0], "project_rich")
         # non-anchor keys keep base order after the anchors
         tail = [k for k in keys if k.startswith("misc_")]
         self.assertEqual(tail, ["misc_hello", "misc_bye", "misc_yes"])

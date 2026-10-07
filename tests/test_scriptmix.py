@@ -57,7 +57,7 @@ class TestScriptMix(unittest.TestCase):
         self.assertEqual(script_mix("%1$s에 깨움", expected_scripts("ko")), [])
 
     def test_short_latin_tokens_allowed(self):
-        self.assertEqual(script_mix("Режим TV и EPG: OK", self.RU), [])
+        self.assertEqual(script_mix("Экспорт в PDF и CSV: OK", self.RU), [])
 
     def test_long_latin_token_flagged(self):
         w = script_mix("Хатагч preset хадгалах", self.RU, latin_token_max=5)
@@ -92,15 +92,15 @@ class TestScriptMix(unittest.TestCase):
 class TestVerifyIntegration(unittest.TestCase):
     def test_verify_warns_on_script_mix(self):
         tmp = make_tmpdir(self)
-        # glossary term "EPG" -> allowlisted; add long brand via [validation]
+        # glossary term "PDF" -> allowlisted; add long brand via [validation]
         toml = L10N_TOML.replace(
-            'semantic = "off"', 'semantic = "off"\nlatin_allowlist = ["Sleepmate"]')
+            'semantic = "off"', 'semantic = "off"\nlatin_allowlist = ["Acmeboard"]')
         project = make_project(tmp, l10n=toml)
         from lloc.hashes import text_hash
         from lloc.store import save_locale
         entries = {
             "menu_search": {"text": "Поиск preset-ов", "src": text_hash("Search")},
-            "items_count": {"text": "Sleepmate: %d", "src": text_hash("Items: %d")},
+            "items_count": {"text": "Acmeboard: %d", "src": text_hash("Items: %d")},
         }
         save_locale(tmp, "ru", entries, list(project.strings))
         out = io.StringIO()
@@ -109,8 +109,8 @@ class TestVerifyIntegration(unittest.TestCase):
         text = out.getvalue()
         self.assertEqual(rc, 0)  # warnings only, exit code untouched
         self.assertIn('untranslated latin token "preset"', text)
-        self.assertNotIn("Sleepmate", [w for w in text.splitlines()
-                                       if "warning" in w and "Sleepmate" in w])
+        self.assertNotIn("Acmeboard", [w for w in text.splitlines()
+                                       if "warning" in w and "Acmeboard" in w])
         self.assertIn("warning(s)", text)
 
 

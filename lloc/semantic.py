@@ -145,7 +145,7 @@ def _same_text(a: str, b: str) -> str:
 
 def arbitrate(project: Project, lang: str, key: str, candidates: list[str],
               client: OllamaClient) -> tuple[str, str]:
-    """Forced choice among imperfect candidates (SPEC.md §13.6): semantic
+    """Forced choice among imperfect candidates: semantic
     conflicts must resolve automatically — a background run has no human, and
     a hole (or a Google-Translate patch) is worse than the least bad
     candidate. Returns (winner, judge's reason)."""
@@ -177,7 +177,7 @@ def arbitrate(project: Project, lang: str, key: str, candidates: list[str],
 
 def ensemble_compare(project: Project, lang: str, pairs: dict[str, tuple[str, str]],
                      client: OllamaClient, direct: bool = False) -> dict[str, str]:
-    """Ensemble phase C (SPEC.md §13.7): compare two independent candidate
+    """Ensemble phase C: compare two independent candidate
     translations per key by MEANING only. Returns {key: "agree"|"c1"|"c2"}.
     Verbatim-equal pairs are "agree" without an LLM call; an unparseable
     judge answer falls back to "c1" (keep the main model's text) — the caller

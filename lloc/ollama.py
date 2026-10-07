@@ -1,4 +1,4 @@
-"""Ollama HTTP client (urllib only). Structured output via `format`. SPEC.md §6.
+"""Ollama HTTP client (urllib only). Structured output via `format`.
 
 Transports are injectable for tests:
   transport(url, payload, timeout) -> dict
@@ -42,7 +42,7 @@ class OllamaError(Exception):
 
 class AdaptiveLimiter:
     """Global adaptive concurrency limiter for ALL LLM requests of the
-    process (SPEC.md §6): HTTP 429 means "slow down", not "fail the
+    process: HTTP 429 means "slow down", not "fail the
     language". On a throttle the limit shrinks (x0.7, floor 2); after
     RECOVERY_STREAK consecutive successes it grows by one back towards the
     ceiling. Waiting threads are governed by a condition variable, so

@@ -10,7 +10,7 @@ class TestConfig(unittest.TestCase):
         p = make_project(make_tmpdir(self))
         self.assertEqual(p.base_language, "en")
         self.assertEqual(p.languages, ["ru", "de"])
-        self.assertEqual(list(p.strings), ["menu_search", "playback_error", "items_count"])
+        self.assertEqual(list(p.strings), ["menu_search", "open_error", "items_count"])
         self.assertEqual(p.strings["menu_search"].type, "button")
         self.assertEqual(p.ollama.batch_size, 3)
         self.assertEqual(p.ollama.workers, 1)
@@ -44,7 +44,7 @@ class TestConfig(unittest.TestCase):
 
 
 class TestProfiles(unittest.TestCase):
-    """[ollama].profile: the whole ensemble setup in one word (SPEC.md §6.2)."""
+    """[ollama].profile: the whole ensemble setup in one word."""
 
     # The shared fixture pins the local profile and tunes [ollama]; these tests
     # need the opposite — a config that states nothing beyond the required

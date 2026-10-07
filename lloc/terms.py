@@ -1,4 +1,4 @@
-"""Automatic terminology consistency. SPEC.md §13.
+"""Automatic terminology consistency.
 
 - extract_terms: frequency-based term candidates from base strings (no LLM).
 - text_terms: which terms a text contains (used for few-shot prioritization).
@@ -48,7 +48,7 @@ def _ar_skeleton(w: str) -> str:
     """Rough consonant skeleton: prefix matching fails for Arabic (definite
     article at the start, broken plurals change the middle), so compare
     skeletons instead: strip ال, weak letters and a trailing ت.
-    القناة -> قن, قنوات -> قن."""
+    المشروع -> مشرع, مشاريع -> مشرع."""
     if w.startswith("ال") and len(w) > 4:
         w = w[2:]
     if not w:
@@ -58,8 +58,8 @@ def _ar_skeleton(w: str) -> str:
 
 def _words_match(a: str, b: str, lang: str = "") -> bool:
     """Same word modulo morphology. Inflection is mostly suffixal, so a common
-    prefix of >= max(3, len-2) counts as a match: этот/этого and Kanal/Kanäle
-    merge, but канал/телеканал and Kanäle/Sender stay apart."""
+    prefix of >= max(3, len-2) counts as a match: этот/этого and Projekt/Projekte
+    merge, but проект/подпроект and Projekte/Vorhaben stay apart."""
     if a == b:
         return True
     if _primary(lang) == "ar":
@@ -71,9 +71,9 @@ def _variants_match(a: str, b: str, lang: str = "") -> bool:
     """Variant comparison, morphology-tolerant on the target side.
 
     - non-segmented scripts (ja/zh/...): substring containment;
-    - equal word counts: pairwise match («этого канала» ~ «этот канал»);
+    - equal word counts: pairwise match («этого проекта» ~ «этот проект»);
     - different word counts: every word of the shorter variant must match some
-      word of the longer one («канала» ~ «этот канал», but not sender ~ kanäle)."""
+      word of the longer one («проекта» ~ «этот проект», but not vorhaben ~ projekte)."""
     if _primary(lang) in NON_SEGMENTED_PRIMARY:
         return a in b or b in a
     aw, bw = a.split(), b.split()
@@ -89,10 +89,10 @@ def _tokens(text: str) -> list[str]:
 
 def _glossary_words(project: Project) -> frozenset[str]:
     """Casefolded single-word [glossary] keys. Derivation vs inflection has no
-    reliable lexical criterion (SPEC §13.5: play + player got prefix-merged and
-    --fix-terms lost the "player" concept), so the glossary is the user's last
+    reliable lexical criterion (edit + editor got prefix-merged and
+    --fix-terms lost the "editor" concept), so the glossary is the user's last
     word: such a word is always its own term and is never merged into another
-    one, while inflections may still merge INTO it (players -> player)."""
+    one, while inflections may still merge INTO it (editors -> editor)."""
     return frozenset(t.casefold() for t in project.glossary if " " not in t.strip())
 
 
@@ -100,11 +100,11 @@ def _match(token: str, rep: str) -> bool:
     return token == rep or (len(rep) >= PREFIX and token.startswith(rep))
 
 
-# --- extraction (SPEC §13.1; group scope §14) ----------------------------
+# --- extraction (group-scoped) ---------------------------------------------
 
 def _group_docs(project: Project):
     """(doc_id, entry, own) triples over the whole group: own module strings
-    plus same-group siblings. The group is the terminology boundary (SPEC §14):
+    plus same-group siblings. The group is the terminology boundary:
     frequency/stopword statistics are group-wide, other groups contribute
     nothing. In single-project mode siblings are empty — behavior unchanged."""
     for key, e in project.strings.items():
@@ -157,7 +157,7 @@ def extract_terms(project: Project) -> dict[str, list[str]]:
     rep = None
     for w in sorted(w for w in occ if w not in stop):
         if rep is not None and len(rep) >= PREFIX and w.startswith(rep) \
-                and w not in gwords:  # glossary word: own term, never swallowed (§13.5)
+                and w not in gwords:  # glossary word: own term, never swallowed
             merged[rep] |= occ[w]
             merged_own[rep] |= own_occ.get(w, set())
         else:
@@ -217,7 +217,7 @@ def text_terms(project: Project, text: str) -> set[str]:
     return found
 
 
-# --- cheap heuristic detector (SPEC §13.3, default verify level) --------
+# --- cheap heuristic detector (default verify level) ---------------------
 
 def heuristic_divergences(project: Project, lang: str, locale: dict[str, dict]) -> list[str]:
     """Warning strings; empty for non-space-segmented target languages."""
@@ -242,7 +242,7 @@ def heuristic_divergences(project: Project, lang: str, locale: dict[str, dict]) 
     return warnings
 
 
-# --- LLM term map (SPEC §13.3b), cached in terms/<lang>.json ------------
+# --- LLM term map, cached in terms/<lang>.json ------------
 
 def term_map_path(project: Project, lang: str):
     return project.root / TERMS_DIR / f"{lang}.json"
@@ -373,7 +373,7 @@ def divergences(data: dict) -> list[Divergence]:
     return out
 
 
-# --- auto-fix (SPEC §13.4) ----------------------------------------------
+# --- auto-fix ----------------------------------------------
 
 WEAK_MAJORITY = 0.6
 

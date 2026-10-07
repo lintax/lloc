@@ -1,6 +1,6 @@
-"""Loading and validation of l10n.toml and strings.toml. See SPEC.md §4.
+"""Loading and validation of l10n.toml and strings.toml.
 
-Workspace mode (SPEC.md §14): a monorepo root keeps everything l10n-related in
+Workspace mode: a monorepo root keeps everything l10n-related in
 one l10n/ directory — l10n/config.toml (members globs + workspace defaults) and
 l10n/<tag>.toml group files (any *.toml except config.toml is a group, filename
 = tag). Module configs stay as l10n.toml inside module directories and inherit
@@ -22,7 +22,7 @@ DEFAULT_MAX_RETRIES = 2
 DEFAULT_NUM_CTX = 8192
 DEFAULT_LENGTH_RATIO = 3.0
 
-# --- model profiles (SPEC.md §6.2) ---------------------------------------
+# --- model profiles ---------------------------------------
 # A profile is the whole ensemble setup in one word: the three model roles
 # (A = translator, B = second opinion, C = judge) plus the throughput knobs
 # they need. Projects get the production setup without configuring anything;
@@ -45,7 +45,7 @@ PROFILES: dict[str, dict] = {
     # Offline fallback sized for a 12 GB GPU: two local models, phased (they
     # do not fit in VRAM together), the second translator doubles as judge.
     "local": {
-        "model": "gemma4:12b-it-qat",   # A/B winner over qwen3.5:9b (SPEC.md §6.1)
+        "model": "gemma4:12b-it-qat",   # A/B winner over qwen3.5:9b
         "ensemble_model": "qwen3.5:9b",
         "semantic_model": None,         # judge = the ensemble model itself
         "batch_size": 10,
@@ -110,7 +110,7 @@ class TermsConfig:
 
 @dataclass
 class Sibling:
-    """Lightweight view of another module of the same group (SPEC.md §14)."""
+    """Lightweight view of another module of the same group."""
     module: str
     root: Path
     strings: dict[str, StringEntry]
@@ -128,7 +128,7 @@ class Project:
     adapter_name: str = ""
     adapter_config: dict = field(default_factory=dict)
     length_ratio: float = DEFAULT_LENGTH_RATIO
-    latin_token_max: int = 5          # [validation]: script-mix heuristic (SPEC.md §7)
+    latin_token_max: int = 5          # [validation]: script-mix heuristic
     latin_allowlist: list[str] = field(default_factory=list)
     script_check: bool = True         # [validation]: reject wrong-script candidates
                                       # (false = escape hatch for pseudo-localization)
@@ -158,7 +158,7 @@ class Project:
     @property
     def ensemble(self) -> bool:
         """Ensemble mode: every string is translated by TWO models with a
-        meaning-only arbitration (SPEC.md §13.7)."""
+        meaning-only arbitration."""
         return self.semantic_mode == "batch" and bool(self.ensemble_model)
 
     @property
@@ -169,7 +169,7 @@ class Project:
 
     @property
     def ensemble_batch(self) -> bool:
-        """Concurrent per-batch ensemble (SPEC.md §13.7): A and B translate
+        """Concurrent per-batch ensemble: A and B translate
         the same batch in parallel, the judge follows immediately. Explicit
         "batch" turns it on; "auto" enables it only when ALL THREE models are
         cloud tags (no VRAM, no swaps — the phases were a swap-era artifact).
@@ -182,8 +182,8 @@ class Project:
                    (self.ollama.model, self.ensemble_model or "", self.ensemble_judge))
     terms: TermsConfig = field(default_factory=TermsConfig)
     strings: dict[str, StringEntry] = field(default_factory=dict)  # insertion-ordered
-    # workspace mode (SPEC.md §14); empty/defaults in single-project mode
-    module: str = ""                # relative path from the workspace root, e.g. "apps/tv"
+    # workspace mode; empty/defaults in single-project mode
+    module: str = ""                # relative path from the workspace root, e.g. "apps/web"
     group: str = ""                 # group tag; a module without one is its own group
     group_context: str = ""         # context from l10n/<tag>.toml
     siblings: list[Sibling] = field(default_factory=list)  # same group, other modules
@@ -222,8 +222,7 @@ def _load_strings(path: Path) -> dict[str, StringEntry]:
         if isinstance(text, dict):
             raise ConfigError(
                 f"{STRINGS_NAME}: [{key}]: plurals are not supported by design; "
-                'rephrase the base text so the form does not depend on the number, e.g. "Items: %d" '
-                "(SPEC.md §12)"
+                'rephrase the base text so the form does not depend on the number, e.g. "Items: %d"'
             )
         if not isinstance(text, str) or not text:
             raise ConfigError(f"{STRINGS_NAME}: [{key}]: missing or empty 'text'")
@@ -336,7 +335,7 @@ def _build_project(root: Path, cfg: dict, require_strings: bool = True) -> Proje
     if "enabled" in t:
         raise ConfigError(
             f"{CONFIG_NAME}: [terms].enabled was removed — the term system is "
-            "always on (decision record: SPEC.md §13.6); delete the key")
+            "always on; delete the key")
     terms = TermsConfig(
         min_occurrences=int(t.get("min_occurrences", 3)),
         min_bigram_occurrences=int(t.get("min_bigram_occurrences", 2)),
@@ -382,7 +381,7 @@ def _build_project(root: Path, cfg: dict, require_strings: bool = True) -> Proje
     )
 
 
-# --- workspace mode (SPEC.md §14) ----------------------------------------
+# --- workspace mode ----------------------------------------
 
 def _workspace_config_path(root: Path) -> Path:
     return root / WORKSPACE_DIR / WORKSPACE_CONFIG

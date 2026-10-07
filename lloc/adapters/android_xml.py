@@ -1,4 +1,4 @@
-"""android-xml adapter: values/strings.xml (base) + values-b+xx/strings.xml. SPEC.md §8.1.
+"""android-xml adapter: values/strings.xml (base) + values-b+xx/strings.xml.
 
 Output matches the conventions of the reference project: UTF-8, no XML
 declaration, 4-space indent, `\\'` escaping, key order = strings.toml order.

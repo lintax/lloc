@@ -1,4 +1,4 @@
-"""Spelled-out language names for prompts (langnames.py). SPEC.md §6."""
+"""Spelled-out language names for prompts (langnames.py)."""
 import unittest
 
 from lloc.langnames import language_name

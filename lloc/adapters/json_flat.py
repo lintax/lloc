@@ -1,4 +1,4 @@
-"""json adapter: flat key -> value JSON, one file per language. SPEC.md §8.2.
+"""json adapter: flat key -> value JSON, one file per language.
 
 Web-i18n friendly (i18next flat resources): `<dir>/<code>.json` with plain
 string values, keys sorted, UTF-8, no nesting — dots in keys stay literal.

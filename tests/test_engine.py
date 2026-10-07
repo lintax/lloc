@@ -50,7 +50,7 @@ class TestTranslateBatch(unittest.TestCase):
 
     def test_retry_recovers_lost_placeholder(self):
         # first response loses %1$s -> validation error -> retry fixes it
-        transport = MockTransport(fail_first={"playback_error": "Плейсхолдер потерян"})
+        transport = MockTransport(fail_first={"open_error": "Плейсхолдер потерян"})
         client = OllamaClient(self.project.ollama, transport=transport)
         accepted, failed, _arb = translate_batch(
             self.project, client, "ru", list(self.project.strings), {})
@@ -62,7 +62,7 @@ class TestTranslateBatch(unittest.TestCase):
         self.assertEqual([m["role"] for m in retry_msgs], ["user", "assistant", "user"])
         self.assertIn("placeholders mismatch", retry_msgs[2]["content"])
         # retry schema narrowed to the failed key only
-        self.assertEqual(transport.calls[1]["format"]["required"], ["playback_error"])
+        self.assertEqual(transport.calls[1]["format"]["required"], ["open_error"])
 
     def test_persistent_failure_reported(self):
         transport = MockTransport(fail_first={"items_count": "без числа"})

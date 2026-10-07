@@ -1,4 +1,4 @@
-"""ios adapter: <lang>.lproj/Localizable.strings. SPEC.md §8.2.
+"""ios adapter: <lang>.lproj/Localizable.strings.
 
 Xcode conventions: per-language `<code>.lproj` directories with BCP-47 codes
 as-is (`es-419.lproj`, `pt-BR.lproj`, `zh-Hant.lproj`); the base language goes

@@ -52,7 +52,7 @@ class TestInlineRejection(unittest.TestCase):
             keys = payload["format"]["required"]
             attempts["n"] += 1
             latin = attempts["n"] == 1
-            ph = {"playback_error": " %1$s", "items_count": " %d"}
+            ph = {"open_error": " %1$s", "items_count": " %d"}
             out = {k: (f"Latinica {k}" if latin else f"Ћирилички превод {'х' * (len(k) % 5 + 1)}") + ph.get(k, "")
                    for k in keys}
             return {"message": {"content": json.dumps(out, ensure_ascii=False)}}
@@ -68,7 +68,7 @@ class TestInlineRejection(unittest.TestCase):
 
         def transport(url, payload, timeout):
             keys = payload["format"]["required"]
-            ph = {"playback_error": " %1$s", "items_count": " %d"}
+            ph = {"open_error": " %1$s", "items_count": " %d"}
             return {"message": {"content": json.dumps(
                 {k: f"Uvek latinica {k}" + ph.get(k, "") for k in keys})}}
 
@@ -98,7 +98,7 @@ class TestInlineRejection(unittest.TestCase):
             if "comparing TWO independent translations" in first:
                 return {"message": {"content": json.dumps(
                     {k: "agree" for k in keys})}}
-            ph = {"playback_error": " %1$s", "items_count": " %d"}
+            ph = {"open_error": " %1$s", "items_count": " %d"}
             if model == "b-cloud":
                 out = {k: f"Ћирилички превод {'х' * (len(k) % 5 + 1)}" + ph.get(k, "") for k in keys}
             else:

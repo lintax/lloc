@@ -63,27 +63,27 @@ class TestTermNoise(unittest.TestCase):
     def test_english_function_words_are_not_terms(self):
         from lloc.terms import extract_terms
         strings = "\n".join(
-            f'[k{i}]\ntext = "Turn off the alarm and check your {w} channel"\n'
-            for i, w in enumerate(["settings", "playback", "sleep", "mixer"]))
+            f'[k{i}]\ntext = "Turn off the alarm and check your {w} project"\n'
+            for i, w in enumerate(["settings", "backup", "sync", "export"]))
         tmp = make_tmpdir(self)
         project = make_project(tmp, strings=strings)
         terms = extract_terms(project)
         for noise in ("the", "and", "your", "off"):
             self.assertNotIn(noise, terms)
         self.assertIn("alarm", terms)  # real terms survive
-        self.assertIn("channel", terms)
+        self.assertIn("project", terms)
 
     def test_verify_caps_term_warnings(self):
         from lloc.__main__ import main
         # 12 strings sharing the term "kanaal" with wildly divergent
         # translations -> more than the cap of heuristic warnings
         strings = "\n".join(
-            f'[k{i:02d}]\ntext = "Open channel number {i} now quickly"\n'
+            f'[k{i:02d}]\ntext = "Open project number {i} now quickly"\n'
             for i in range(12))
         tmp = make_tmpdir(self)
         project = make_project(tmp, strings=strings)
         entries = {f"k{i:02d}": {"text": f"Wort{i} übersetzung{i} nummer",
-                                 "src": text_hash(f"Open channel number {i} now quickly")}
+                                 "src": text_hash(f"Open project number {i} now quickly")}
                    for i in range(12)}
         save_locale(tmp, "de", entries, list(project.strings))
         out = io.StringIO()

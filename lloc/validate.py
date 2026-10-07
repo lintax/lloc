@@ -1,4 +1,4 @@
-"""Post-translation validation. SPEC.md §7.
+"""Post-translation validation.
 
 A translation identical to the source is NOT an error: in closely related
 languages many strings legitimately coincide ("Start", "Status", "OK").
@@ -52,7 +52,7 @@ def check_translation(base: str, translated: str, length_ratio: float = 3.0) -> 
 
 # --- script-mix heuristic (verify warning, no LLM) -----------------------
 
-DEFAULT_LATIN_TOKEN_MAX = 5  # latin tokens this short pass anywhere ("OK", "EPG", "min")
+DEFAULT_LATIN_TOKEN_MAX = 5  # latin tokens this short pass anywhere ("OK", "PDF", "min")
 
 _LETTER_RUN_RE = re.compile(r"[^\W\d_]+")
 

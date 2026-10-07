@@ -16,7 +16,7 @@ from .helpers import make_tmpdir
 
 L10N = """\
 [app]
-description = "TV app"
+description = "Project tracker"
 base_language = "en"
 languages = ["ru", "ja"]
 [ollama]
@@ -28,21 +28,21 @@ adapter = "android-xml"
 res_dir = "res"
 """
 
-# "the" appears in 5/6 strings -> DF stopword; "channel(s)" in 4 -> term;
-# "live stream" bigram in 2 -> term; "settings" only 1 -> not a term.
+# "the" appears in 5/6 strings -> DF stopword; "project(s)" in 4 -> term;
+# "cloud sync" bigram in 2 -> term; "settings" only 1 -> not a term.
 STRINGS = """\
-[open_channel]
-text = "Open the channel"
-[channel_list]
-text = "All the channels"
-[channel_lock]
-text = "The channel is locked"
-[channel_epg]
-text = "No guide for the channel"
-[stream_start]
-text = "Starting the live stream"
-[stream_stop]
-text = "Live stream stopped"
+[open_project]
+text = "Open the project"
+[project_list]
+text = "All the projects"
+[project_lock]
+text = "The project is locked"
+[project_notes]
+text = "No notes for the project"
+[sync_start]
+text = "Starting the cloud sync"
+[sync_stop]
+text = "Cloud sync stopped"
 """
 
 
@@ -53,15 +53,15 @@ def _project(testcase):
     return load_project(tmp)
 
 
-def _locale_ru(project, channel_words):
-    """Build an ok-status ru locale; channel strings translated with given words."""
+def _locale_ru(project, project_words):
+    """Build an ok-status ru locale; project strings translated with given words."""
     texts = {
-        "open_channel": f"Открыть {channel_words[0]}",
-        "channel_list": f"Все {channel_words[1]}",
-        "channel_lock": f"{channel_words[2]} заблокирован",
-        "channel_epg": f"Нет программы для {channel_words[3]}",
-        "stream_start": "Запуск прямой трансляции",
-        "stream_stop": "Прямая трансляция остановлена",
+        "open_project": f"Открыть {project_words[0]}",
+        "project_list": f"Все {project_words[1]}",
+        "project_lock": f"{project_words[2]} заблокирован",
+        "project_notes": f"Нет заметок для {project_words[3]}",
+        "sync_start": "Запуск облачной синхронизации",
+        "sync_stop": "Облачная синхронизация остановлена",
     }
     return {k: {"text": v, "src": text_hash(project.strings[k].text)}
             for k, v in texts.items()}
@@ -73,49 +73,49 @@ class TestExtraction(unittest.TestCase):
 
     def test_terms_extracted(self):
         terms = extract_terms(self.project)
-        self.assertIn("channel", terms)                      # prefix-merged channels
-        self.assertEqual(len(terms["channel"]), 4)
-        self.assertIn("live stream", terms)                  # bigram, 2 strings
+        self.assertIn("project", terms)                      # prefix-merged projects
+        self.assertEqual(len(terms["project"]), 4)
+        self.assertIn("cloud sync", terms)                  # bigram, 2 strings
         self.assertNotIn("the", terms)                       # DF stopword
         self.assertNotIn("settings", terms)                  # below min_occurrences
 
     def test_text_terms_matching(self):
-        self.assertEqual(text_terms(self.project, "Channels are here"), {"channel"})
-        self.assertIn("live stream", text_terms(self.project, "a live stream plays"))
+        self.assertEqual(text_terms(self.project, "Projects are here"), {"project"})
+        self.assertIn("cloud sync", text_terms(self.project, "a cloud sync runs"))
         self.assertEqual(text_terms(self.project, "Nothing relevant"), set())
 
     def test_fewshot_prefers_term_examples(self):
         from lloc.config import StringEntry
         from lloc.prompts import select_examples
-        # the few-shot pool is trusted-only (SPEC §13.6): mark entries manual
+        # the few-shot pool is trusted-only: mark entries manual
         locale = {
-            # term-sharing example (channel)
-            "channel_list": {"text": "Все каналы", "src": "x", "model": "manual"},
+            # term-sharing example (project)
+            "project_list": {"text": "Все проекты", "src": "x", "model": "manual"},
             # word-overlap only ("open" not a term)
-            "stream_start": {"text": "Запуск", "src": "x", "model": "manual"},
+            "sync_start": {"text": "Запуск", "src": "x", "model": "manual"},
         }
-        batch = [StringEntry(key="new_key", text="Lock the channel now")]
-        self.project.strings["new_key"] = StringEntry(key="new_key", text="Lock the channel now")
+        batch = [StringEntry(key="new_key", text="Lock the project now")]
+        self.project.strings["new_key"] = StringEntry(key="new_key", text="Lock the project now")
         examples = select_examples(self.project, batch, locale)
-        self.assertEqual(examples[0][1], "Все каналы")       # term match ranked first
+        self.assertEqual(examples[0][1], "Все проекты")       # term match ranked first
 
 
 STRINGS_PLAY = """\
 [app_tagline]
-text = "A fast and simple TV player"
+text = "A fast and simple text editor"
 [play_button]
-text = "Play"
+text = "Edit"
 [play_trailer]
-text = "Play trailer"
+text = "Edit title"
 [play_game]
-text = "Play a game"
-[player_settings]
-text = "Player settings"
+text = "Edit a note"
+[editor_settings]
+text = "Editor settings"
 """
 
 
 class TestGlossaryBoundary(unittest.TestCase):
-    """SPEC §13.5: derivation (play/player) has no lexical criterion, so a
+    """derivation (edit/editor) has no lexical criterion, so a
     [glossary] word is the boundary: its own term, never prefix-merged."""
 
     def _project(self, glossary="", strings=STRINGS_PLAY, l10n=L10N):
@@ -125,48 +125,48 @@ class TestGlossaryBoundary(unittest.TestCase):
         return load_project(tmp)
 
     def test_without_glossary_known_limitation(self):
-        # documents §13.5: play swallows player when nothing marks the boundary
+        # edit swallows editor when nothing marks the boundary
         terms = extract_terms(self._project())
-        self.assertIn("app_tagline", terms["play"])
-        self.assertNotIn("player", terms)
+        self.assertIn("app_tagline", terms["edit"])
+        self.assertNotIn("editor", terms)
 
-    def test_glossary_player_not_merged_into_play(self):
-        project = self._project('[glossary]\n"player" = { ru = "плеер" }\n')
+    def test_glossary_editor_not_merged_into_edit(self):
+        project = self._project('[glossary]\n"editor" = { ru = "редактор" }\n')
         terms = extract_terms(project)
-        self.assertEqual(set(terms["play"]),
+        self.assertEqual(set(terms["edit"]),
                          {"play_button", "play_trailer", "play_game"})
         # own term even below min_occurrences (glossary is the last word)
-        self.assertEqual(set(terms["player"]), {"app_tagline", "player_settings"})
+        self.assertEqual(set(terms["editor"]), {"app_tagline", "editor_settings"})
 
     def test_inflection_still_merges_into_glossary_term(self):
-        # channels -> channel must keep merging when "channel" itself is glossaried
-        project = self._project('[glossary]\n"channel" = { ru = "канал" }\n',
+        # projects -> project must keep merging when "project" itself is glossaried
+        project = self._project('[glossary]\n"project" = { ru = "проект" }\n',
                                 strings=STRINGS)
         terms = extract_terms(project)
-        self.assertIn("channel", terms)
-        self.assertEqual(len(terms["channel"]), 4)
-        self.assertNotIn("channels", terms)
+        self.assertIn("project", terms)
+        self.assertEqual(len(terms["project"]), 4)
+        self.assertNotIn("projects", terms)
 
     def test_ru_base_inflection_still_merges(self):
         # no glossary involved: plain declension merging must be untouched
         strings = """\
 [a]
-text = "Открыть канал"
+text = "Открыть проект"
 [b]
-text = "Нет программы для канала"
+text = "Нет заметок для проекта"
 [c]
-text = "Все каналы здесь"
+text = "Все проекты здесь"
 """
         l10n = L10N.replace('base_language = "en"', 'base_language = "ru"') \
                    .replace('languages = ["ru", "ja"]', 'languages = ["en", "ja"]')
         project = self._project(strings=strings, l10n=l10n)
         terms = extract_terms(project)
-        self.assertEqual(set(terms["канал"]), {"a", "b", "c"})
+        self.assertEqual(set(terms["проект"]), {"a", "b", "c"})
 
     def test_text_terms_glossary_word_matches_only_itself(self):
-        project = self._project('[glossary]\n"player" = { ru = "плеер" }\n')
-        self.assertEqual(text_terms(project, "A fast TV player"), {"player"})
-        self.assertEqual(text_terms(project, "Play the game"), {"play"})
+        project = self._project('[glossary]\n"editor" = { ru = "редактор" }\n')
+        self.assertEqual(text_terms(project, "A fast text editor"), {"editor"})
+        self.assertEqual(text_terms(project, "Edit the note"), {"edit"})
 
 
 class TestHeuristic(unittest.TestCase):
@@ -174,52 +174,52 @@ class TestHeuristic(unittest.TestCase):
         self.project = _project(self)
 
     def test_consistent_quiet(self):
-        locale = _locale_ru(self.project, ["канал", "каналы", "Канал", "канала"])
+        locale = _locale_ru(self.project, ["проект", "проекты", "Проект", "проекта"])
         self.assertEqual(heuristic_divergences(self.project, "ru", locale), [])
 
     def test_divergent_flagged(self):
-        locale = _locale_ru(self.project, ["канал", "каналы", "Телеканал", "канала"])
+        locale = _locale_ru(self.project, ["проект", "проекты", "Подпроект", "проекта"])
         warnings = heuristic_divergences(self.project, "ru", locale)
         self.assertEqual(len(warnings), 1)
-        self.assertIn('"channel"', warnings[0])
-        self.assertIn("channel_lock", warnings[0])
+        self.assertIn('"project"', warnings[0])
+        self.assertIn("project_lock", warnings[0])
 
     def test_non_segmented_skipped(self):
-        locale = _locale_ru(self.project, ["канал", "каналы", "Телеканал", "канала"])
+        locale = _locale_ru(self.project, ["проект", "проекты", "Подпроект", "проекта"])
         self.assertEqual(heuristic_divergences(self.project, "ja", locale), [])
 
     def test_stale_strings_ignored(self):
-        locale = _locale_ru(self.project, ["канал", "каналы", "Телеканал", "канала"])
-        locale["channel_lock"]["src"] = "0000000000000000"   # stale -> not analyzed
+        locale = _locale_ru(self.project, ["проект", "проекты", "Подпроект", "проекта"])
+        locale["project_lock"]["src"] = "0000000000000000"   # stale -> not analyzed
         self.assertEqual(heuristic_divergences(self.project, "ru", locale), [])
 
 
 class TestVariantMatching(unittest.TestCase):
-    """Morphology-tolerant comparison of translated term variants (SPEC §13.3)."""
+    """Morphology-tolerant comparison of translated term variants."""
 
     def test_ru_inflection_merges(self):
         from lloc.terms import _variants_match
-        self.assertTrue(_variants_match("этот канал", "этого канала", "ru"))   # user's FP
-        self.assertTrue(_variants_match("канал", "каналы", "ru"))
-        self.assertTrue(_variants_match("канала", "этот канал", "ru"))         # word-count diff
-        self.assertFalse(_variants_match("канал", "телеканал", "ru"))          # derivation
-        self.assertFalse(_variants_match("канал", "передача", "ru"))
+        self.assertTrue(_variants_match("этот проект", "этого проекта", "ru"))   # user's FP
+        self.assertTrue(_variants_match("проект", "проекты", "ru"))
+        self.assertTrue(_variants_match("проекта", "этот проект", "ru"))         # word-count diff
+        self.assertFalse(_variants_match("проект", "подпроект", "ru"))          # derivation
+        self.assertFalse(_variants_match("проект", "задача", "ru"))
 
     def test_de_real_divergence_stays(self):
         from lloc.terms import _variants_match
-        self.assertFalse(_variants_match("kanäle", "sender", "de"))            # real problem
-        self.assertTrue(_variants_match("sender", "sendern", "de"))            # inflection
+        self.assertFalse(_variants_match("projekte", "vorhaben", "de"))            # real problem
+        self.assertTrue(_variants_match("vorhaben", "vorhabens", "de"))            # inflection
 
     def test_ar_article_and_broken_plural_merge(self):
         from lloc.terms import _variants_match
-        self.assertTrue(_variants_match("القناة", "قنوات", "ar"))              # user's FP
-        self.assertTrue(_variants_match("قناة", "القناة", "ar"))
-        self.assertFalse(_variants_match("قناة", "محطة", "ar"))                # different word
+        self.assertTrue(_variants_match("المشروع", "مشاريع", "ar"))              # user's FP
+        self.assertTrue(_variants_match("مشروع", "المشروع", "ar"))
+        self.assertFalse(_variants_match("مشروع", "مهمة", "ar"))                # different word
 
     def test_ja_substring_containment(self):
         from lloc.terms import _variants_match
         self.assertTrue(_variants_match("ロック", "ロックされています", "ja"))
-        self.assertFalse(_variants_match("チャンネル", "番組", "ja"))
+        self.assertFalse(_variants_match("プロジェクト", "タスク", "ja"))
 
     def test_short_words_not_overmerged(self):
         from lloc.terms import _words_match
@@ -229,10 +229,10 @@ class TestVariantMatching(unittest.TestCase):
     def test_grouping_uses_language(self):
         from lloc.terms import divergences
         data = {"version": 1, "language": "ru",
-                "terms": {"this channel": {
-                    "a": {"src": "x", "tr": "этого канала"},
-                    "b": {"src": "x", "tr": "этот канал"},
-                    "c": {"src": "x", "tr": "Этот канал"}}},
+                "terms": {"this project": {
+                    "a": {"src": "x", "tr": "этого проекта"},
+                    "b": {"src": "x", "tr": "этот проект"},
+                    "c": {"src": "x", "tr": "Этот проект"}}},
                 "accepted": {}}
         self.assertEqual(divergences(data), [])                                # merged, quiet
 
@@ -267,12 +267,12 @@ class TestTermMap(unittest.TestCase):
         self.project = _project(self)
 
     def test_build_incremental_and_divergences(self):
-        locale = _locale_ru(self.project, ["канал", "каналы", "телеканал", "канала"])
+        locale = _locale_ru(self.project, ["проект", "проекты", "подпроект", "проекта"])
         save_locale(self.project.root, "ru", locale, list(self.project.strings))
         transport = TermMapTransport({
-            "open_channel": "канал", "channel_list": "каналы",
-            "channel_lock": "телеканал", "channel_epg": "канала",
-            "stream_start": "прямой трансляции", "stream_stop": "прямая трансляция",
+            "open_project": "проект", "project_list": "проекты",
+            "project_lock": "подпроект", "project_notes": "проекта",
+            "sync_start": "облачной синхронизации", "sync_stop": "облачная синхронизация",
         })
         client = OllamaClient(self.project.ollama, transport=transport)
         data = build_term_map(self.project, "ru", locale, client)
@@ -281,11 +281,11 @@ class TestTermMap(unittest.TestCase):
         self.assertTrue((self.project.root / "terms" / "ru.json").is_file())
 
         divs = divergences(data)
-        self.assertEqual(len(divs), 1)                        # stream variants prefix-merge
+        self.assertEqual(len(divs), 1)                        # sync variants prefix-merge
         d = divs[0]
-        self.assertEqual(d.term, "channel")
-        self.assertEqual(d.majority, "канал")                 # канал/каналы/канала merge
-        self.assertEqual(d.variants["телеканал"], ["channel_lock"])
+        self.assertEqual(d.term, "project")
+        self.assertEqual(d.majority, "проект")                 # проект/проекты/проекта merge
+        self.assertEqual(d.variants["подпроект"], ["project_lock"])
         self.assertAlmostEqual(d.fraction, 0.75)
 
         # incremental: nothing changed -> no new requests
@@ -294,37 +294,37 @@ class TestTermMap(unittest.TestCase):
 
     def test_accepted_suppresses(self):
         data = {"version": 1, "language": "ru",
-                "terms": {"channel": {
-                    "a": {"src": "x", "tr": "канал"},
-                    "b": {"src": "x", "tr": "телеканал"}}},
-                "accepted": {"channel": ["канал", "телеканал"]}}
+                "terms": {"project": {
+                    "a": {"src": "x", "tr": "проект"},
+                    "b": {"src": "x", "tr": "подпроект"}}},
+                "accepted": {"project": ["проект", "подпроект"]}}
         self.assertEqual(divergences(data), [])
 
 
 class TestFixTerms(unittest.TestCase):
     def setUp(self):
         self.project = _project(self)
-        self.locale = _locale_ru(self.project, ["канал", "каналы", "телеканал", "канала"])
+        self.locale = _locale_ru(self.project, ["проект", "проекты", "подпроект", "проекта"])
         save_locale(self.project.root, "ru", self.locale, list(self.project.strings))
         self.extract_map = {
-            "open_channel": "канал", "channel_list": "каналы",
-            "channel_lock": "телеканал", "channel_epg": "канала",
-            "stream_start": "трансляции", "stream_stop": "трансляция",
+            "open_project": "проект", "project_list": "проекты",
+            "project_lock": "подпроект", "project_notes": "проекта",
+            "sync_start": "синхронизации", "sync_stop": "синхронизация",
         }
 
     def test_fix_retranslates_minority_with_pinned_note(self):
         transport = TermMapTransport(
-            self.extract_map, translate={"channel_lock": "Канал заблокирован"})
+            self.extract_map, translate={"project_lock": "Проект заблокирован"})
         client = OllamaClient(self.project.ollama, transport=transport)
 
         def obedient(url, payload, timeout):
             resp = transport(url, payload, timeout)
             content = payload["messages"][-1]["content"]
-            if "term under analysis" in content and "channel_lock" in content \
+            if "term under analysis" in content and "project_lock" in content \
                     and transport.translate_prompts:
                 # after the fix, extraction sees the majority variant
                 keys = payload["format"]["required"]
-                out = {k: ("канал" if k == "channel_lock" else self.extract_map.get(k, "-"))
+                out = {k: ("проект" if k == "project_lock" else self.extract_map.get(k, "-"))
                        for k in keys}
                 return {"message": {"content": json.dumps(out, ensure_ascii=False)}}
             return resp
@@ -338,24 +338,24 @@ class TestFixTerms(unittest.TestCase):
         # pinned note present in the re-translation prompt
         self.assertTrue(transport.translate_prompts)
         note = transport.translate_prompts[0]
-        self.assertIn('TERMINOLOGY: in this app "channel" is translated as "канал"', note)
+        self.assertIn('TERMINOLOGY: in this app "project" is translated as "проект"', note)
         self.assertIn("unless", note)
         # locale updated
         from lloc.store import load_locale
-        self.assertEqual(load_locale(self.project.root, "ru")["channel_lock"]["text"],
-                         "Канал заблокирован")
+        self.assertEqual(load_locale(self.project.root, "ru")["project_lock"]["text"],
+                         "Проект заблокирован")
 
     def test_persistent_divergence_becomes_accepted_and_idempotent(self):
-        # model insists on its variant: re-translation keeps "телеканал"
+        # model insists on its variant: re-translation keeps "подпроект"
         transport = TermMapTransport(
-            self.extract_map, translate={"channel_lock": "Телеканал заблокирован"})
+            self.extract_map, translate={"project_lock": "Подпроект заблокирован"})
         client = OllamaClient(self.project.ollama, transport=transport)
         with redirect_stdout(io.StringIO()):
             stats = fix_language(self.project, "ru", client)
-        self.assertEqual(stats["accepted"], ["channel"])
+        self.assertEqual(stats["accepted"], ["project"])
         data = load_term_map(self.project, "ru")
-        self.assertIn("канал", data["accepted"]["channel"])
-        self.assertIn("телеканал", data["accepted"]["channel"])
+        self.assertIn("проект", data["accepted"]["project"])
+        self.assertIn("подпроект", data["accepted"]["project"])
 
         # second run: divergence accepted -> nothing to do, no re-translation
         before = len(transport.translate_prompts)

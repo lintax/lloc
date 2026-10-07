@@ -1,4 +1,4 @@
-"""Bootstrap: generate strings.toml from an existing base platform file. SPEC.md §9."""
+"""Bootstrap: generate strings.toml from an existing base platform file."""
 from __future__ import annotations
 
 import re
