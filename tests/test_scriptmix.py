@@ -56,6 +56,9 @@ class TestScriptMix(unittest.TestCase):
         self.assertEqual(script_mix("%1$dч %2$dм", self.RU), [])
         self.assertEqual(script_mix("%1$s에 깨움", expected_scripts("ko")), [])
 
+    def test_brace_placeholders_not_flagged(self):
+        self.assertEqual(script_mix("Проект {projectName}: {{taskCount}}", self.RU), [])
+
     def test_short_latin_tokens_allowed(self):
         self.assertEqual(script_mix("Экспорт в PDF и CSV: OK", self.RU), [])
 

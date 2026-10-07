@@ -252,8 +252,8 @@ single-model run, which is a deliberate trade of speed for reliability.
 Each candidate is validated before it is judged; a failure triggers a retry
 with the specific errors, up to `max_retries`:
 
-- **Placeholders**: the multiset of `%s`, `%d`, `%1$s`, `%@`, `\n` must match
-  the base text.
+- **Placeholders**: the multiset of `%s`, `%d`, `%1$s`, `%@`, `{name}`,
+  `{{count}}`, `\n` must match the base text.
 - **Length**: at most `length_ratio` (default 3.0) times the base, with a
   floor so short strings are not rejected.
 - **Cleanliness**: no reasoning, wrapping quotes or empty values.
@@ -343,6 +343,10 @@ Further settings:
   swaps to the judge once, then swaps back to fix the suspects. `inline`
   checks the previous batch while the next one is translated; it needs both
   models in memory, so set `OLLAMA_MAX_LOADED_MODELS=2`.
+
+- **`[ollama] prompts_dir`** points to a directory with your own copies of the
+  templates in `prompts/`, relative to `l10n.toml`. Templates are filled with
+  `str.format`, so literal braces must be doubled.
 
 When the judge belongs to neither translator's family, it compares the
 candidates with the original directly, in one call per batch. Otherwise it

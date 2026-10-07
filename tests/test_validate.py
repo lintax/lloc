@@ -12,6 +12,14 @@ class TestPlaceholders(unittest.TestCase):
         self.assertEqual(c["%%"], 1)
         self.assertEqual(c["\n"], 1)
 
+    def test_brace_placeholders(self):
+        c = placeholders("Hi {name}, {{count}} of {0} ({{value, number}})")
+        self.assertEqual(c["{name}"], 1)
+        self.assertEqual(c["{{count}}"], 1)
+        self.assertEqual(c["{0}"], 1)
+        self.assertEqual(c["{{value, number}}"], 1)
+        self.assertEqual(placeholders("a { b } c {}"), placeholders(""))  # plain braces
+
 
 class TestCheckTranslation(unittest.TestCase):
     def test_ok(self):
@@ -29,6 +37,11 @@ class TestCheckTranslation(unittest.TestCase):
         self.assertEqual(len(errs), 1)
         self.assertIn("placeholders mismatch", errs[0])
         self.assertIn("%1$s", errs[0])
+
+    def test_brace_placeholder_translated(self):
+        self.assertEqual(check_translation("Hi {name}", "Привет, {name}"), [])
+        errs = check_translation("Tasks: {{count}}", "Задачи: {{количество}}")
+        self.assertIn("placeholders mismatch", errs[0])
 
     def test_placeholder_mutated(self):
         errs = check_translation("Open %1$s", "Открыть %s")

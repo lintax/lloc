@@ -10,7 +10,8 @@ Glossary for {target_language} (use these translations verbatim):
 TASK: Translate the strings below from {base_language} to {target_language}.
 
 Rules:
-- Preserve all placeholders exactly: %s, %d, %1$s, \n etc.
+- Preserve all placeholders exactly: %s, %d, %1$s, %@, {{name}}, {{{{count}}}}, \n etc.
+  Never translate the name inside braces. Keep markup tags (<b>, <br/>) unchanged.
 - Keep translations reasonably concise; this is UI text.
 - The per-string context is MORE important than surface similarity of wording:
   identical words in different contexts may require different translations.

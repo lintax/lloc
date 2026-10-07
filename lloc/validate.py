@@ -10,8 +10,10 @@ import unicodedata
 from collections import Counter
 
 # printf-style placeholders (%s, %d, %1$s, %.2f, %%) incl. iOS %@ / %1$@,
-# and escape sequences.
-PLACEHOLDER_RE = re.compile(r"%(?:\d+\$)?(?:\.\d+)?[sdfxXeg@]|%%")
+# brace placeholders ({name}, {0}, i18next {{count}}), and escape sequences.
+PLACEHOLDER_RE = re.compile(
+    r"%(?:\d+\$)?(?:\.\d+)?[sdfxXeg@]|%%"
+    r"|\{\{[^{}\n]+\}\}|\{[A-Za-z0-9_.]+\}")
 ESCAPE_RE = re.compile(r"\n|\t")
 
 MIN_LENGTH_BASE = 10  # ratio check uses max(len(base), this) to avoid noise on tiny strings
