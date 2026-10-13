@@ -69,6 +69,14 @@ class TestParse(unittest.TestCase):
         self.assertEqual(parse(' key:0 "x"\nl_english:\n other:0 "y"\n'),
                          [("other", "0", "y")])
 
+    def test_name_lists_are_not_translatable(self):
+        from lloc.adapters.paradox_yml import is_name
+        self.assertTrue(is_name("Neo-", "Neo-", "anything"))
+        self.assertTrue(is_name("star_1", "Aldebaran", "09random_names"))
+        self.assertTrue(is_name("x", "Thorin", "name_list_mem_DWARVES"))
+        self.assertFalse(is_name("tech_alpha", "Alpha Drive", "mem_nameless_one"))
+        self.assertFalse(is_name("event.1.name", "A Name", "events_expanded"))
+
     def test_string_type(self):
         self.assertEqual(string_type("tech_alpha_desc"), "description")
         self.assertEqual(string_type("demo.1.a"), "event option")

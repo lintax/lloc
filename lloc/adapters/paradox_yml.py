@@ -16,6 +16,9 @@ into strings.toml (with `type`/`context` derived from the key and file name).
 Text is stored unescaped: the two-character `\\n` of the files becomes a real
 line break (so the usual escape validation applies) and `\\"` a plain quote.
 
+Name lists (the key is the name itself, or the file is a `*_names` /
+`name_list_*` file) are left out of strings.toml like script-only values.
+
 import_ returns the translations that already ship with the source, minus
 the ones that are plainly still English — mods routinely copy the base text
 into every language file. Export writes machine/manual translations only:
@@ -60,6 +63,18 @@ _TYPES = (
     (re.compile(r"(?i)\.\d+\.[a-z]\d?$"), "event option"),
     (re.compile(r"(?i)[._](name|title|plural|adj)$"), "name"),
 )
+
+
+# name-list files: star, ship, species and leader names
+_NAME_FILE_RE = re.compile(r"(?i)(^|_)name_?lists?(_|$)|(^|_|\d)(random_)?names?(_|$)")
+
+
+def is_name(key: str, text: str, stem: str) -> bool:
+    """Name-list entries are proper names the game draws at random: there is
+    nothing to translate, and thousands of them per mod. The game's own
+    convention marks them (the key IS the name); the file name catches the
+    rest."""
+    return text.strip() == key or bool(_NAME_FILE_RE.search(stem))
 
 
 def string_type(key: str) -> str:
@@ -193,7 +208,8 @@ class ParadoxYmlAdapter(Adapter):
     def _translatable(self) -> tuple[dict[str, tuple[str, str, str]], int]:
         found = self._scan(self.project.base_language)
         keep = {k: v for k, v in found.items()
-                if any(c.isalpha() for c in strip_placeholders(v[0], STYLE))}
+                if any(c.isalpha() for c in strip_placeholders(v[0], STYLE))
+                and not is_name(k, v[0], v[2])}
         return keep, len(found) - len(keep)
 
     def bootstrap_source(self) -> tuple[dict[str, str], int]:

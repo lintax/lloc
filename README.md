@@ -189,7 +189,9 @@ exclude = ["*consolidated_l_*"]     # file names to ignore on import
 
 - **paradox-yml**: the English files are the source and are never written;
   `import --bootstrap-strings` builds `strings.toml` from them, with `type`
-  and `context` derived from the key and the file name. `import` skips
+  and `context` derived from the key and the file name. Name lists (the key
+  is the name itself, or a `*_names` / `name_list_*` file) are left out, like
+  values that are only script references. `import` skips
   translations that are still English, and `build` writes only what lloc
   translated. Game syntax (`$VAR$`, `[Root.GetName]`, `£icon£`, `§Y…§!`,
   `#bold…#!`) is validated like placeholders; this is
