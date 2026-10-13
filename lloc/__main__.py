@@ -442,11 +442,13 @@ def cmd_verify(project, args) -> int:
         for key in st.ok:
             base = project.strings[key].text
             text = locale[key]["text"]
-            errs = check_translation(base, text, project.length_ratio) + adapter.check(text)
+            errs = check_translation(base, text, project.length_ratio,
+                                     project.placeholder_style) + adapter.check(text)
             for e in errs:
                 problems += 1
                 print(f"[{lang}] {key}: {e}")
-            for w in script_mix(text, expected, project.latin_token_max, allow):
+            for w in script_mix(text, expected, project.latin_token_max, allow,
+                                project.placeholder_style):
                 warn_count += 1
                 print(f"[{lang}] warning: {key}: {w}")
         if not st.clean:
@@ -504,7 +506,7 @@ def cmd_import(project, args) -> int:
     if not entries:
         print("error: no translatable strings found in the base file", file=sys.stderr)
         return 2
-    write_strings_toml(dest, entries)
+    write_strings_toml(dest, entries, adapter.bootstrap_meta())
     print(f"bootstrap: wrote {dest.name} with {len(entries)} strings "
           f"(skipped {skipped} special/non-translatable)")
     return 0
@@ -583,7 +585,8 @@ def cmd_set(project, args) -> int:
 
     base = project.strings[args.key].text
     adapter = get_adapter(project)
-    errors = check_translation(base, args.text, project.length_ratio) \
+    errors = check_translation(base, args.text, project.length_ratio,
+                               project.placeholder_style) \
         + adapter.check(args.text)
     if errors:
         for e in errors:

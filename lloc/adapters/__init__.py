@@ -6,11 +6,13 @@ from .android_xml import AndroidXmlAdapter
 from .base import Adapter
 from .ios_strings import IosStringsAdapter
 from .json_flat import JsonAdapter
+from .paradox_yml import ParadoxYmlAdapter
 
 REGISTRY: dict[str, type[Adapter]] = {
     AndroidXmlAdapter.name: AndroidXmlAdapter,
     IosStringsAdapter.name: IosStringsAdapter,
     JsonAdapter.name: JsonAdapter,
+    ParadoxYmlAdapter.name: ParadoxYmlAdapter,
 }
 
 

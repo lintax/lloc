@@ -16,6 +16,20 @@ PLACEHOLDER_RE = re.compile(
     r"|\{\{[^{}\n]+\}\}|\{[A-Za-z0-9_.]+\}")
 ESCAPE_RE = re.compile(r"\n|\t")
 
+# Paradox script syntax (paradox-yml adapter): $VARIABLE$ / $NUM|V%$,
+# [Root.GetName], £energy£ icons, §Y ... §! colour codes, @icon!,
+# #bold ... #! formatting. Tokens are compared as a multiset like the rest;
+# the text between a formatting pair is ordinary translatable text.
+PARADOX_RE = re.compile(
+    r"\$[^$\s]+\$|\[[^\]\n]+\]|£[A-Za-z0-9_|]+£?|§[A-Za-z0-9!]"
+    r"|@[A-Za-z0-9_]+!|#!|#[A-Za-z_][A-Za-z0-9_;:]*(?=\s)")
+
+# [validation].placeholder_style -> the pattern used for that project
+PLACEHOLDER_STYLES: dict[str, re.Pattern] = {
+    "": PLACEHOLDER_RE,
+    "paradox": re.compile(PARADOX_RE.pattern + "|" + PLACEHOLDER_RE.pattern),
+}
+
 MIN_LENGTH_BASE = 10  # ratio check uses max(len(base), this) to avoid noise on tiny strings
 # Absolute floor for the length limit: short bases in long-script languages
 # (Devanagari, Tamil, Sinhala...) legitimately blow past ratio*len — e.g.
@@ -24,17 +38,22 @@ MIN_LENGTH_BASE = 10  # ratio check uses max(len(base), this) to avoid noise on 
 MIN_LENGTH_LIMIT = 48
 
 
-def placeholders(text: str) -> Counter:
-    return Counter(PLACEHOLDER_RE.findall(text)) + Counter(ESCAPE_RE.findall(text))
+def placeholders(text: str, style: str = "") -> Counter:
+    return Counter(PLACEHOLDER_STYLES[style].findall(text)) + Counter(ESCAPE_RE.findall(text))
 
 
-def check_translation(base: str, translated: str, length_ratio: float = 3.0) -> list[str]:
+def strip_placeholders(text: str, style: str = "") -> str:
+    return PLACEHOLDER_STYLES[style].sub(" ", text)
+
+
+def check_translation(base: str, translated: str, length_ratio: float = 3.0,
+                      style: str = "") -> list[str]:
     """Return a list of human-readable problems (empty list = valid)."""
     errors: list[str] = []
     if not isinstance(translated, str) or not translated.strip():
         return ["translation is empty"]
 
-    got, want = placeholders(translated), placeholders(base)
+    got, want = placeholders(translated, style), placeholders(base, style)
     if got != want:
         def fmt(c: Counter) -> str:
             return ", ".join(sorted(c.elements())) or "(none)"
@@ -68,7 +87,7 @@ def _char_script(ch: str) -> str | None:
 
 def script_error(text: str, expected: frozenset[str],
                  latin_token_max: int = DEFAULT_LATIN_TOKEN_MAX,
-                 allow: frozenset[str] = frozenset()) -> str | None:
+                 allow: frozenset[str] = frozenset(), style: str = "") -> str | None:
     """Inline candidate validation (translate): the DOMINANT script of the
     translation must be the language's expected script — both cloud models
     happily write Serbian in Latin unless rejected. Placeholders are
@@ -76,7 +95,7 @@ def script_error(text: str, expected: frozenset[str],
     passes the usual allowances (short tokens, brands) — "OK" or "%1$d h"
     must not be rejected for a Cyrillic language."""
     counts: dict[str, int] = {}
-    for ch in PLACEHOLDER_RE.sub(" ", text):
+    for ch in strip_placeholders(text, style):
         s = _char_script(ch) if ch.isalpha() else None
         if s:
             counts[s] = counts.get(s, 0) + 1
@@ -85,7 +104,7 @@ def script_error(text: str, expected: frozenset[str],
     dominant = max(counts, key=counts.get)
     if dominant in expected:
         return None
-    if dominant == "LATIN" and not script_mix(text, expected, latin_token_max, allow):
+    if dominant == "LATIN" and not script_mix(text, expected, latin_token_max, allow, style):
         return None  # latin-only but within allowances (brands, "OK", units)
     want = "/".join(sorted(expected)).title()
     return (f"wrong script: the translation is mostly {dominant.title()}, "
@@ -95,7 +114,7 @@ def script_error(text: str, expected: frozenset[str],
 
 def script_mix(text: str, expected: frozenset[str],
                latin_token_max: int = DEFAULT_LATIN_TOKEN_MAX,
-               allow: frozenset[str] = frozenset()) -> list[str]:
+               allow: frozenset[str] = frozenset(), style: str = "") -> list[str]:
     """Warnings for letters of a foreign Unicode script in a translation
     (live example: Burmese letters inside Armenian text).
 
@@ -115,7 +134,7 @@ def script_mix(text: str, expected: frozenset[str],
     flagging: a latin letter inside a Cyrillic word is a defect."""
     spaceless = bool(expected & {"CJK", "HANGUL", "HIRAGANA", "KATAKANA"})
     warnings: list[str] = []
-    for m in _LETTER_RUN_RE.finditer(PLACEHOLDER_RE.sub(" ", text)):
+    for m in _LETTER_RUN_RE.finditer(strip_placeholders(text, style)):
         run = m.group(0)
         scripts = {s for s in (_char_script(c) for c in run) if s}
         foreign = scripts - expected

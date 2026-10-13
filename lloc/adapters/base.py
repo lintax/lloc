@@ -30,3 +30,8 @@ class Adapter:
         Returns ({key: raw_text} in document order, count of skipped
         non-translatable entries)."""
         raise NotImplementedError
+
+    def bootstrap_meta(self) -> dict[str, dict[str, str]]:
+        """Optional per-key {"context": ..., "type": ...} the platform files
+        imply; written into the bootstrapped strings.toml."""
+        return {}

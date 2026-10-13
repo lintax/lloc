@@ -130,6 +130,7 @@ class Project:
     length_ratio: float = DEFAULT_LENGTH_RATIO
     latin_token_max: int = 5          # [validation]: script-mix heuristic
     latin_allowlist: list[str] = field(default_factory=list)
+    placeholder_style: str = ""       # [validation]: "" | "paradox" (validate.PLACEHOLDER_STYLES)
     script_check: bool = True         # [validation]: reject wrong-script candidates
                                       # (false = escape hatch for pseudo-localization)
     models: dict[str, str] = field(default_factory=dict)  # [models]: per-language override
@@ -187,6 +188,8 @@ class Project:
     group: str = ""                 # group tag; a module without one is its own group
     group_context: str = ""         # context from l10n/<tag>.toml
     siblings: list[Sibling] = field(default_factory=list)  # same group, other modules
+    reference: bool = False         # read-only corpus of approved translations
+    references: list[Sibling] = field(default_factory=list)  # same group, reference modules
 
     @property
     def full_context(self) -> str:
@@ -199,6 +202,10 @@ class Project:
 class Workspace:
     root: Path                      # monorepo root (the directory containing l10n/)
     members: list[Project]
+    # `reference = true` modules: a corpus of approved translations (a mod's
+    # base game, a parent product). Few-shot examples are retrieved from them;
+    # they take no part in workspace runs or in term statistics.
+    references: list[Project] = field(default_factory=list)
     workers: int = DEFAULT_WORKERS  # shared worker pool for the whole run
 
 
@@ -306,6 +313,12 @@ def _build_project(root: Path, cfg: dict, require_strings: bool = True) -> Proje
     latin_token_max = int(validation.get("latin_token_max", 5))
     latin_allowlist = [str(x) for x in validation.get("latin_allowlist", [])]
     script_check = bool(validation.get("script_check", True))
+    # the adapter implies the syntax of its platform; an explicit key wins
+    placeholder_style = str(validation.get(
+        "placeholder_style", "paradox" if adapter_name == "paradox-yml" else ""))
+    if placeholder_style not in ("", "paradox"):
+        raise ConfigError(f'{CONFIG_NAME}: [validation].placeholder_style must be '
+                          f'"" or "paradox", got {placeholder_style!r}')
     semantic_mode = str(validation.get("semantic", "batch"))
     if semantic_mode not in ("batch", "off"):
         raise ConfigError(f'{CONFIG_NAME}: [validation].semantic must be "batch" or "off", '
@@ -370,6 +383,7 @@ def _build_project(root: Path, cfg: dict, require_strings: bool = True) -> Proje
         length_ratio=length_ratio,
         latin_token_max=latin_token_max,
         latin_allowlist=latin_allowlist,
+        placeholder_style=placeholder_style,
         script_check=script_check,
         semantic_mode=semantic_mode,
         semantic_model=semantic_model,
@@ -443,15 +457,22 @@ def _load_workspace(root: Path, cfg: dict, require_strings: bool = True) -> Work
         tag = mcfg.get("group") or mcfg.get("app", {}).get("group")
         if tag is not None and (not isinstance(tag, str) or not tag):
             raise ConfigError(f"{d / CONFIG_NAME}: 'group' must be a non-empty string")
-        project.group = tag or project.module
+        project.reference = mcfg.get("reference", False) is True
+        # a reference module without a group serves the whole workspace
+        project.group = tag or ("" if project.reference else project.module)
         project.group_context = _group_context(root, project.group, explicit=bool(tag))
         members.append(project)
-    for m in members:  # wire same-group siblings (term/few-shot boundary)
+    references = [m for m in members if m.reference]
+    members = [m for m in members if not m.reference]
+    for m in members + references:  # wire same-group siblings (term/few-shot boundary)
         m.siblings = [Sibling(o.module, o.root, o.strings)
                       for o in members if o is not m and o.group == m.group]
+        m.references = [Sibling(o.module, o.root, o.strings)
+                        for o in references if o is not m and o.group in ("", m.group)]
     _, prof = _resolve_profile(cfg, f"{WORKSPACE_DIR}/{WORKSPACE_CONFIG}")
     workers = int(cfg.get("ollama", {}).get("workers", prof["workers"]))
-    return Workspace(root=root, members=members, workers=max(1, workers))
+    return Workspace(root=root, members=members, references=references,
+                     workers=max(1, workers))
 
 
 def _find_workspace_member(root: Path, require_strings: bool) -> Project | None:
@@ -471,7 +492,7 @@ def _find_workspace_member(root: Path, require_strings: bool) -> Project | None:
         if root not in dirs:
             return None  # nearest workspace does not list this module -> standalone
         ws = _load_workspace(parent, cfg, require_strings=False)
-        me = next(m for m in ws.members if m.root == root)
+        me = next(m for m in ws.members + ws.references if m.root == root)
         if require_strings and not me.strings:
             raise ConfigError(f"file not found: {root / STRINGS_NAME}")
         return me

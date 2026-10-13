@@ -171,12 +171,32 @@ adapter = "json"                    # one flat, key-sorted <lang>.json per langu
 dir = "../web/src/i18n"
 ```
 
+```toml
+[output]
+adapter = "paradox-yml"             # Paradox games and mods: key:0 "text"
+[output.paradox-yml]
+source_dir = "/path/to/mod"         # scanned for *_l_<language>.yml
+out_dir = "out"                     # <out_dir>/russian/lloc_l_russian.yml
+exclude = ["*consolidated_l_*"]     # file names to ignore on import
+```
+
 - **android-xml**: strings marked `translatable="false"`, `<string-array>` and
   `<plurals>` live in the XML only and survive `build`.
 - **ios**: directories are named by BCP-47 code as is (`es-419.lproj`); the
   base language goes to `<base>.lproj`, not `Base.lproj`. `context` is written
   as a `/* ... */` comment. `%@` and `%1$@` are validated like `%s`.
 - **json**: no nesting; dots in keys are literal.
+
+- **paradox-yml**: the English files are the source and are never written;
+  `import --bootstrap-strings` builds `strings.toml` from them, with `type`
+  and `context` derived from the key and the file name. `import` skips
+  translations that are still English, and `build` writes only what lloc
+  translated. Game syntax (`$VAR$`, `[Root.GetName]`, `£icon£`, `§Y…§!`,
+  `#bold…#!`) is validated like placeholders; this is
+  `[validation] placeholder_style = "paradox"`, set by the adapter.
+  `prompts/paradox/` holds a game-oriented `translate.txt`: point
+  `[ollama] prompts_dir` at it. A custom prompts directory may contain only
+  the templates it overrides.
 
 Android legacy codes (`in`, `iw`) are never used in iOS or JSON file names.
 
@@ -236,6 +256,25 @@ Inheritance has two levels: workspace defaults, then the module, which wins
 per key. A group is the consistency boundary: few-shot examples and
 terminology are shared inside it and never cross it. `verify` warns about
 duplicate keys within a group.
+
+### Reference modules
+
+A module marked `reference = true` is a read-only corpus of approved
+translations: the base game for a mod, a parent product for an add-on.
+
+```toml
+# vanilla/l10n.toml
+group = "stellaris"
+reference = true
+```
+
+Fill it once with `import --bootstrap-strings` and `import`. Without a
+`group` it serves every module of the workspace, which otherwise share
+nothing with each other: mods of one game all learn from the game, not from
+one another. Modules it serves then get up to 24 extra few-shot examples per batch from it: the
+shortest reference strings that share words with the batch, rarer words
+first. A reference module is skipped by workspace runs and does not affect
+term statistics, so it can hold hundreds of thousands of strings.
 
 ## How translation works
 

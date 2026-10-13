@@ -166,7 +166,8 @@ def translate_batch(
         newly: dict[str, str] = {}
         for key, entry in list(pending.items()):
             value = parsed.get(key)
-            errors = check_translation(entry.text, value, project.length_ratio) \
+            errors = check_translation(entry.text, value, project.length_ratio,
+                                       project.placeholder_style) \
                 if value is not None else ["missing from response"]
             if not errors and project.script_check:
                 # wrong-script candidates are rejected inline (live case: both
@@ -177,7 +178,8 @@ def translate_batch(
                     {t.casefold() for t in project.latin_allowlist}
                     | {w.casefold() for term in project.glossary for w in term.split()})
                 err = script_error(value, expected_scripts(lang),
-                                   project.latin_token_max, allow)
+                                   project.latin_token_max, allow,
+                                   project.placeholder_style)
                 if err:
                     errors = [err]
             if not errors:
