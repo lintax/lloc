@@ -1,5 +1,6 @@
 """Ctrl+C during translate: no hang, progress saved, exit 130."""
 import io
+import sys
 import time
 import unittest
 import unittest.mock
@@ -120,6 +121,24 @@ class TestCliInterrupt(unittest.TestCase):
             rc = cli.main(["--dir", str(tmp), "translate", "--no-build"])
         fake_exit.assert_called_once_with(130)
         self.assertEqual(rc, 130)
+
+    def test_exits_even_when_output_pipe_is_closed(self):
+        # a closed GUI leaves lloc writing into a pipe nobody reads: the
+        # message fails with BrokenPipeError, the exit must still happen
+        from lloc import __main__ as cli
+
+        class Broken(io.StringIO):
+            def write(self, _s):
+                raise BrokenPipeError(32, "Broken pipe")
+
+            def flush(self):
+                raise BrokenPipeError(32, "Broken pipe")
+
+        with unittest.mock.patch("os._exit") as fake_exit, \
+             unittest.mock.patch.object(sys, "stderr", Broken()), \
+             unittest.mock.patch.object(sys, "stdout", Broken()):
+            cli._interrupted()
+        fake_exit.assert_called_once_with(130)
 
 
 if __name__ == "__main__":

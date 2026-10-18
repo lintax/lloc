@@ -838,7 +838,10 @@ def _interrupted() -> int:
     import signal
     with suppress(Exception):
         signal.signal(signal.SIGINT, lambda *_: os._exit(130))
-    print("\ninterrupted — progress saved, rerun to continue", file=sys.stderr)
+    # the reader of our output may already be gone (a GUI that was closed):
+    # a broken pipe here must not keep the process alive
+    with suppress(Exception):
+        print("\ninterrupted — progress saved, rerun to continue", file=sys.stderr)
     with suppress(Exception):
         sys.stdout.flush()
         sys.stderr.flush()
