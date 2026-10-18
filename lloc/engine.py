@@ -26,6 +26,27 @@ _cancel = threading.Event()  # set on Ctrl+C: workers stop at the next batch bou
 _batch_slots: threading.BoundedSemaphore | None = None
 
 HEARTBEAT_SEC = 30.0
+# the shortest wait for a part of a split batch (see translate_batch)
+SPLIT_TIMEOUT_MIN_SEC = 30.0
+
+# Requests timed out in a row across the run, reset by any reply: a string the
+# model loops on times out alone, while a dead server times them all out.
+_timeouts_lock = threading.Lock()
+_timeouts_in_row = 0
+
+
+def _note_timeout(e: OllamaError, workers: int) -> None:
+    global _timeouts_in_row
+    with _timeouts_lock:
+        _timeouts_in_row += 1
+        if _timeouts_in_row >= max(4, 2 * workers):
+            raise e
+
+
+def _note_reply() -> None:
+    global _timeouts_in_row
+    with _timeouts_lock:
+        _timeouts_in_row = 0
 
 
 class TranslateInterrupted(Exception):
@@ -124,6 +145,7 @@ def translate_batch(
     extra_note: str | None = None,
     semantic: bool = False,
     prompt: str | None = None,
+    timeout: float | None = None,
 ) -> tuple[dict[str, str], dict[str, list[str]], dict[str, tuple[str, str, int]]]:
     """Translate one batch. Returns (accepted {key: text}, failed {key: errors},
     arbitrated {key: (text, reason, n_candidates)}).
@@ -152,11 +174,14 @@ def translate_batch(
     last_errors: dict[str, list[str]] = {}
     candidates: dict[str, list[str]] = {}  # semantically bounced texts per key
 
+    timed_out = False  # the last request got no reply in time
     for attempt in range(project.ollama.max_retries + 1):
         try:
-            parsed, raw = client.chat(messages, schema)
+            # a timeout is not sent again as is: the batch is split below
+            parsed, raw = client.chat(messages, schema, timeout_tries=1, timeout=timeout)
         except OllamaBadResponse as e:
             # empty/garbled reply is retryable, not fatal
+            _note_reply()
             last_errors = {k: [str(e)] for k in pending}
             if attempt == project.ollama.max_retries:
                 break
@@ -168,6 +193,17 @@ def translate_batch(
                 {"role": "user", "content": retry_prompt},
             ]
             continue
+        except OllamaError as e:
+            if not e.timed_out:
+                raise
+            # A model that loops on one string (a line of "mmmm...", one
+            # sentence repeated) never finishes the reply. Too many timeouts
+            # in a row mean the server itself is down: that one is fatal.
+            _note_timeout(e, project.ollama.workers)
+            timed_out = True
+            last_errors = {k: [str(e)] for k in pending}
+            break
+        _note_reply()
         last_errors = {}
         newly: dict[str, str] = {}
         for key, entry in list(pending.items()):
@@ -235,6 +271,26 @@ def translate_batch(
     # makes a forced choice among the collected candidates (they all passed
     # placeholder validation, so any of them is safe to ship)
     arbitrated: dict[str, tuple[str, str, int]] = {}
+    if timed_out and len(pending) > 1:
+        # Split what the model could not answer, so one string it loops on
+        # takes no other strings down with it; alone, it stays failed.
+        rest = list(pending)
+        mid = len(rest) // 2
+        _log(f"splitting {len(rest)} strings in two after: {last_errors[rest[0]][0]}")
+        whole = timeout or project.ollama.timeout_sec
+        for half in (rest[:mid], rest[mid:]):
+            # a smaller request answers sooner: wait for it in proportion
+            part = min(whole, max(SPLIT_TIMEOUT_MIN_SEC, whole * len(half) / len(rest)))
+            acc, fail, arb = translate_batch(project, client, lang, half, locale,
+                                             extra_note, semantic, timeout=part)
+            accepted.update(acc)
+            arbitrated.update(arb)
+            for key in half:
+                pending.pop(key, None)
+                last_errors.pop(key, None)
+            last_errors.update(fail)
+        return accepted, last_errors, arbitrated
+
     if semantic:
         from .semantic import arbitrate
         for key in list(pending):
@@ -1083,6 +1139,7 @@ def run_translate_jobs(
     global _model_note_shown, _batch_slots
     _model_note_shown = False  # fresh note per run
     _cancel.clear()
+    _note_reply()
     _batch_slots = threading.BoundedSemaphore(workers) if workers > 1 else None
     if any(p.ensemble for p, _l, _k in jobs):
         try:

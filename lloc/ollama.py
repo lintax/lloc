@@ -253,19 +253,26 @@ class OllamaClient:
 
     # --- chat ------------------------------------------------------------
 
-    def chat(self, messages: list[dict], schema: dict) -> tuple[dict, str]:
+    def chat(self, messages: list[dict], schema: dict,
+             timeout_tries: int = TIMEOUT_TRIES,
+             timeout: float | None = None) -> tuple[dict, str]:
         """Send a chat request with structured output. Returns (parsed, raw_content).
+        `timeout_tries` = 1 hands a timeout straight to the caller, which may
+        rather split the request than send the same one again; `timeout`
+        overrides timeout_sec for this request.
 
         If the model is not present locally, pulls it and retries once."""
         try:
-            return self._chat_once(messages, schema)
+            return self._chat_once(messages, schema, timeout_tries, timeout)
         except OllamaError as e:
             if not self._is_model_missing(e):
                 raise
             self.pull_model()
-            return self._chat_once(messages, schema)
+            return self._chat_once(messages, schema, timeout_tries, timeout)
 
-    def _chat_once(self, messages: list[dict], schema: dict) -> tuple[dict, str]:
+    def _chat_once(self, messages: list[dict], schema: dict,
+                   timeout_tries: int = TIMEOUT_TRIES,
+                   timeout: float | None = None) -> tuple[dict, str]:
         # num_ctx: explicit config value always wins; otherwise local models
         # get the safe default (Ollama's own 4096 truncates few-shot prompts),
         # while CLOUD models get no num_ctx at all — the server sizes the
@@ -288,17 +295,18 @@ class OllamaClient:
             # `message.thinking` and leave `content` empty; disable thinking.
             payload["think"] = _think_value(self.cfg.model)
         try:
-            resp = self._transport_throttled(f"{self.cfg.url}/api/chat", payload)
+            resp = self._transport_throttled(f"{self.cfg.url}/api/chat", payload,
+                                             timeout_tries, timeout)
         except OllamaError as e:
             if self._send_think and self._is_think_unsupported(e):
                 self._send_think = False
-                return self._chat_once(messages, schema)
+                return self._chat_once(messages, schema, timeout_tries, timeout)
             raise
         if "error" in resp:
             err = str(resp["error"])
             if self._send_think and "think" in err.lower():
                 self._send_think = False
-                return self._chat_once(messages, schema)
+                return self._chat_once(messages, schema, timeout_tries, timeout)
             raise OllamaError(f"Ollama error: {err}")
 
         message = resp.get("message", {})
@@ -314,7 +322,9 @@ class OllamaClient:
             raise OllamaBadResponse(f"model returned non-object JSON: {raw[:300]!r}", raw=raw)
         return parsed, raw
 
-    def _transport_throttled(self, url: str, payload: dict) -> dict:
+    def _transport_throttled(self, url: str, payload: dict,
+                             timeout_tries: int = TIMEOUT_TRIES,
+                             timeout: float | None = None) -> dict:
         """One logical request under the global adaptive limiter. HTTP 429 is
         retried with exponential backoff + jitter (honouring Retry-After),
         NEVER surfaced as fatal until the retry budget is exhausted.
@@ -326,7 +336,7 @@ class OllamaClient:
         for attempt in range(BACKOFF_TRIES):
             with _limiter:
                 try:
-                    resp = self.transport(url, payload, self.cfg.timeout_sec)
+                    resp = self.transport(url, payload, timeout or self.cfg.timeout_sec)
                     _limiter.on_success()
                     return resp
                 except OllamaError as e:
@@ -339,8 +349,8 @@ class OllamaClient:
                         tries = BACKOFF_TRIES
                         if e.timed_out:
                             timeouts += 1
-                            tries = TIMEOUT_TRIES
-                            last = last or timeouts >= TIMEOUT_TRIES
+                            tries = timeout_tries
+                            last = last or timeouts >= timeout_tries
                         if last:
                             raise
                         n = timeouts + 1 if e.timed_out else attempt + 2

@@ -202,5 +202,59 @@ class TestParallelEnsembleBatches(unittest.TestCase):
         self.assertEqual(written, set(load_semantic(p, "ru")["entries"]))
 
 
+class Looping(MockTransport):
+    """A model that never finishes a reply containing one of `bad` keys,
+    or any reply at all when `bad` is None."""
+
+    def __init__(self, bad=None):
+        super().__init__()
+        self.bad = bad
+        self.timeouts = 0
+        self.waits: list[float] = []
+
+    def __call__(self, url, payload, timeout):
+        keys = payload["format"]["required"]
+        if self.bad is None or set(keys) & set(self.bad):
+            self.calls.append(payload)
+            self.timeouts += 1
+            self.waits.append(timeout)
+            raise OllamaError(f"Ollama request timed out after {timeout}s",
+                              timed_out=True)
+        return super().__call__(url, payload, timeout)
+
+
+def batch_project(tmp, batch_size: int, workers: int = 1):
+    l10n = (L10N_TOML.replace("batch_size = 3", f"batch_size = {batch_size}")
+            .replace("workers = 1", f"workers = {workers}"))
+    return make_project(tmp, l10n=l10n, strings=STRINGS)
+
+
+class TestTimedOutBatchIsSplit(unittest.TestCase):
+    def test_one_looping_string_takes_no_others_down(self):
+        tmp = make_tmpdir(self)
+        transport = Looping(bad=["s5"])
+        with redirect_stdout(io.StringIO()) as out:
+            results = run_translate(batch_project(tmp, 12), ["ru"], transport=transport)
+        r = results[0]
+        self.assertIsNone(r.error)
+        self.assertEqual(r.translated, 11)
+        self.assertEqual(list(r.failed), ["s5"])
+        self.assertNotIn("s5", load_locale(tmp, "ru"))
+        self.assertIn("splitting 12 strings", out.getvalue())
+        # halving: 12 -> 6 -> 3 -> 2 -> 1, one timeout per level, each part
+        # waited for in proportion to its size, never under 30 s
+        self.assertEqual(transport.timeouts, 5)
+        self.assertEqual(transport.waits, [120, 60, 30, 30, 30])
+
+    def test_server_down_is_still_fatal(self):
+        tmp = make_tmpdir(self)
+        transport = Looping(bad=None)
+        with redirect_stdout(io.StringIO()):
+            results = run_translate(batch_project(tmp, 12), ["ru"], transport=transport)
+        self.assertIn("timed out", results[0].error)
+        self.assertEqual(len(load_locale(tmp, "ru")), 0)
+        self.assertLessEqual(len(transport.calls), 4)  # the breaker: max(4, 2 * workers)
+
+
 if __name__ == "__main__":
     unittest.main()
