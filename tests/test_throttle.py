@@ -65,12 +65,14 @@ class TestBackoffOn429(unittest.TestCase):
                                          {"required": ["k"], "properties": {}})
         self.assertEqual(len(self.sleeps), ollama_mod.BACKOFF_TRIES - 1)
 
-    def test_non_429_not_retried(self):
+    def test_non_retryable_error_not_retried(self):
+        # 5xx and timeouts are retried too (tests/test_transient.py); a
+        # client error is not
         calls = {"n": 0}
 
         def transport(url, payload, timeout):
             calls["n"] += 1
-            raise OllamaError("Ollama HTTP 500: boom", status=500)
+            raise OllamaError("Ollama HTTP 400: bad request", status=400)
 
         with self.assertRaises(OllamaError):
             self._client(transport).chat([{"role": "user", "content": "x"}],

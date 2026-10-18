@@ -14,8 +14,10 @@ Notes:
 """
 from __future__ import annotations
 
+import http.client
 import json
 import random
+import socket
 import re
 import sys
 import threading
@@ -34,10 +36,15 @@ class OllamaError(Exception):
     """Transport/protocol-level failure (unreachable, HTTP error, model missing)."""
 
     def __init__(self, message: str, status: int | None = None,
-                 retry_after: float | None = None):
+                 retry_after: float | None = None, transient: bool = False,
+                 timed_out: bool = False):
         super().__init__(message)
         self.status = status
         self.retry_after = retry_after
+        # transient: a timeout or a dropped connection; the same request may
+        # well succeed when sent again
+        self.transient = transient or timed_out
+        self.timed_out = timed_out
 
 
 class AdaptiveLimiter:
@@ -97,10 +104,44 @@ _limiter = AdaptiveLimiter()
 BACKOFF_BASE_SEC = 1.0
 BACKOFF_CAP_SEC = 30.0
 BACKOFF_TRIES = 6
+# a timed-out request already cost up to timeout_sec: retry it only twice
+TIMEOUT_TRIES = 3
+# server-side failures worth asking again (gateway hiccups, overload)
+RETRY_STATUSES = frozenset({500, 502, 503, 504, 529})
 
 
 def _is_throttle(e: OllamaError) -> bool:
     return e.status == 429 or "too many concurrent" in str(e).lower()
+
+
+def _is_retryable(e: OllamaError) -> bool:
+    """Not a throttle, but sending the request again may well work."""
+    return e.transient or e.status in RETRY_STATUSES
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    return isinstance(exc, (TimeoutError, socket.timeout))
+
+
+def _network_error(url: str, timeout: int, exc: BaseException) -> OllamaError:
+    """Map a low-level failure to OllamaError. A refused connection or an
+    unknown host means the daemon is not there: fatal. A timeout or a
+    connection dropped mid-request is transient."""
+    if _is_timeout(exc):
+        return OllamaError(f"Ollama request timed out after {timeout}s ({url})",
+                           timed_out=True)
+    if isinstance(exc, (ConnectionRefusedError, socket.gaierror)):
+        return OllamaError(f"cannot reach Ollama at {url}: {exc}")
+    return OllamaError(f"connection to Ollama lost ({url}): "
+                       f"{type(exc).__name__}: {exc}", transient=True)
+
+
+def _url_error(url: str, timeout: int, e: urllib.error.URLError) -> OllamaError:
+    reason = e.reason
+    if isinstance(reason, BaseException) and not isinstance(
+            reason, (ConnectionRefusedError, socket.gaierror)):
+        return _network_error(url, timeout, reason)
+    return OllamaError(f"cannot reach Ollama at {url}: {reason}")
 
 
 class OllamaBadResponse(OllamaError):
@@ -145,7 +186,10 @@ def _http_transport(url: str, payload: dict, timeout: int) -> dict:
     except urllib.error.HTTPError as e:
         raise _http_error_to_ollama(url, e) from e
     except urllib.error.URLError as e:
-        raise OllamaError(f"cannot reach Ollama at {url}: {e.reason}") from e
+        raise _url_error(url, timeout, e) from e
+    except (OSError, http.client.HTTPException) as e:
+        # raised by getresponse()/read(), which urllib does not wrap
+        raise _network_error(url, timeout, e) from e
 
 
 def _http_stream_transport(url: str, payload: dict, timeout: int):
@@ -158,7 +202,9 @@ def _http_stream_transport(url: str, payload: dict, timeout: int):
     except urllib.error.HTTPError as e:
         raise _http_error_to_ollama(url, e) from e
     except urllib.error.URLError as e:
-        raise OllamaError(f"cannot reach Ollama at {url}: {e.reason}") from e
+        raise _url_error(url, timeout, e) from e
+    except (OSError, http.client.HTTPException) as e:
+        raise _network_error(url, timeout, e) from e
 
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```\s*$")
@@ -271,8 +317,12 @@ class OllamaClient:
     def _transport_throttled(self, url: str, payload: dict) -> dict:
         """One logical request under the global adaptive limiter. HTTP 429 is
         retried with exponential backoff + jitter (honouring Retry-After),
-        NEVER surfaced as fatal until the retry budget is exhausted."""
+        NEVER surfaced as fatal until the retry budget is exhausted.
+        Timeouts, dropped connections and 5xx are retried with the same
+        backoff (timeouts fewer times: each one already took timeout_sec);
+        only 429 shrinks the concurrency limit."""
         delay = BACKOFF_BASE_SEC
+        timeouts = 0
         for attempt in range(BACKOFF_TRIES):
             with _limiter:
                 try:
@@ -280,9 +330,23 @@ class OllamaClient:
                     _limiter.on_success()
                     return resp
                 except OllamaError as e:
-                    if not _is_throttle(e) or attempt == BACKOFF_TRIES - 1:
+                    last = attempt == BACKOFF_TRIES - 1
+                    if _is_throttle(e):
+                        if last:
+                            raise
+                        _limiter.on_throttle()
+                    elif _is_retryable(e):
+                        tries = BACKOFF_TRIES
+                        if e.timed_out:
+                            timeouts += 1
+                            tries = TIMEOUT_TRIES
+                            last = last or timeouts >= TIMEOUT_TRIES
+                        if last:
+                            raise
+                        n = timeouts + 1 if e.timed_out else attempt + 2
+                        print(f"retrying after {e} (attempt {n}/{tries})", flush=True)
+                    else:
                         raise
-                    _limiter.on_throttle()
                     wait = e.retry_after if e.retry_after \
                         else delay * (1.0 + random.random() * 0.25)
             time.sleep(wait)  # sleep OUTSIDE the limiter slot
