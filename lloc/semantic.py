@@ -21,7 +21,9 @@ then clears those cache entries so the next --semantic run re-checks them.
 """
 from __future__ import annotations
 
+import functools
 import json
+import threading
 
 from .config import Project
 from .fsutil import atomic_write_text
@@ -55,11 +57,26 @@ def verified_pairs(root, lang: str) -> dict[str, str]:
     from pathlib import Path
 
     p = Path(root) / SEMANTIC_DIR / f"{lang}.json"
-    if not p.is_file():
+    try:
+        st = p.stat()
+    except FileNotFoundError:
         return {}
+    # asked for on every batch: parse the file again only when it changed
+    stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
+    with _verified_lock:
+        hit = _verified_cache.get(p)
+        if hit is not None and hit[0] == stamp:
+            return hit[1]
     data = json.loads(p.read_text(encoding="utf-8"))
-    return {k: e.get("src", "") for k, e in data.get("entries", {}).items()
-            if e.get("verdict") == "ok"}
+    pairs = {k: e.get("src", "") for k, e in data.get("entries", {}).items()
+             if e.get("verdict") == "ok"}
+    with _verified_lock:
+        _verified_cache[p] = (stamp, pairs)
+    return pairs
+
+
+_verified_cache: dict = {}
+_verified_lock = threading.Lock()
 
 
 def semantic_path(project: Project, lang: str):
@@ -79,6 +96,7 @@ def save_semantic(project: Project, lang: str, data: dict) -> None:
     atomic_write_text(p, json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
+@functools.lru_cache(maxsize=1 << 18)
 def _pair_hash(base: str, translated: str) -> str:
     return text_hash(base + "\x00" + translated)
 

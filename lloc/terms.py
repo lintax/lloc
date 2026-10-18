@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from dataclasses import dataclass
 
 from .config import Project
@@ -187,11 +188,19 @@ def extract_terms(project: Project) -> dict[str, list[str]]:
     }
 
 
+# Worker threads ask for the same project's terms at once: one builds them,
+# the others wait instead of repeating the work.
+_build_lock = threading.Lock()
+
+
 def get_terms(project: Project) -> dict[str, list[str]]:
     cache = getattr(project, "_terms_cache", None)
     if cache is None:
-        cache = extract_terms(project)
-        project._terms_cache = cache
+        with _build_lock:
+            cache = getattr(project, "_terms_cache", None)
+            if cache is None:
+                cache = extract_terms(project)
+                project._terms_cache = cache
     return cache
 
 
@@ -201,13 +210,13 @@ class _TermIndex:
     that equals it or is one of its prefixes of PREFIX+ letters (_match), so a
     lookup tries those few prefixes instead of scanning every term."""
 
-    def __init__(self, project: Project):
+    def __init__(self, project: Project, terms: dict[str, list[str]]):
         self.gwords = _glossary_words(project)
         self.single: set[str] = set()
         self.pairs: dict[tuple[str, str], list[str]] = {}
         self.firsts: set[str] = set()
         self.seconds: set[str] = set()
-        for term in get_terms(project):
+        for term in terms:
             parts = term.split(" ")
             if len(parts) == 1:
                 self.single.add(parts[0])
@@ -230,8 +239,12 @@ class _TermIndex:
 def _term_index(project: Project) -> _TermIndex:
     index = getattr(project, "_term_index", None)
     if index is None:
-        index = _TermIndex(project)
-        project._term_index = index
+        terms = get_terms(project)  # outside the lock: it takes the lock itself
+        with _build_lock:
+            index = getattr(project, "_term_index", None)
+            if index is None:
+                index = _TermIndex(project, terms)
+                project._term_index = index
     return index
 
 

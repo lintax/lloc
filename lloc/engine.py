@@ -123,6 +123,7 @@ def translate_batch(
     locale: dict[str, dict],
     extra_note: str | None = None,
     semantic: bool = False,
+    prompt: str | None = None,
 ) -> tuple[dict[str, str], dict[str, list[str]], dict[str, tuple[str, str, int]]]:
     """Translate one batch. Returns (accepted {key: text}, failed {key: errors},
     arbitrated {key: (text, reason, n_candidates)}).
@@ -142,7 +143,8 @@ def translate_batch(
     (~2.5-3x slower) — that is the point: safety over speed."""
     entries = [project.strings[k] for k in keys]
     schema = string_schema(keys)
-    prompt = build_translate_prompt(project, lang, entries, locale, extra_note)
+    if prompt is None:  # the ensemble builds it once for both translators
+        prompt = build_translate_prompt(project, lang, entries, locale, extra_note)
     messages = [{"role": "user", "content": prompt}]
 
     accepted: dict[str, str] = {}
@@ -510,12 +512,19 @@ def _anchor_order(project: Project, keys: list[str], ok_count: int) -> list[str]
     total = len(project.strings) or 1
     if not keys or ok_count >= ANCHOR_COLD_RATIO * total:
         return keys
-    from .terms import extract_terms
+    anchors = _anchors(project, keys)
+    seen = set(anchors)
+    return anchors + [k for k in keys if k not in seen]
+
+
+def _anchors(project: Project, keys: list[str]) -> list[str]:
+    """One representative of `keys` per frequent term (see _anchor_order)."""
+    from .terms import get_terms
 
     keyset = set(keys)
     anchors: list[str] = []
     seen: set[str] = set()
-    for _term, term_keys in extract_terms(project).items():
+    for _term, term_keys in get_terms(project).items():
         cands = [k for k in term_keys if k in keyset]
         if not cands:
             continue
@@ -524,7 +533,7 @@ def _anchor_order(project: Project, keys: list[str], ok_count: int) -> list[str]
         if best not in seen:
             seen.add(best)
             anchors.append(best)
-    return anchors + [k for k in keys if k not in seen]
+    return anchors
 
 
 def plan(project: Project, langs: list[str], force: bool, limit: int | None,
@@ -620,6 +629,9 @@ def _ensemble_batch_language(project: Project, lang: str, keys: list[str],
     judged_total = 0
     b_wins = 0
     processed: set[str] = set()
+    # guards locale, result, the counters and the locale/semantic files while
+    # batches run in parallel; network calls are made outside it
+    commit_lock = threading.Lock()
 
     # strong third-party judge (produced neither candidate) compares the
     # pair against the original DIRECTLY — no back-translations, one call
@@ -630,7 +642,6 @@ def _ensemble_batch_language(project: Project, lang: str, keys: list[str],
                          a_new: dict[str, str], label: str = "") -> None:
         """C-judge the pairs, then write everything in ONE save: A-only keys
         as unverified-pending, agreed as ok, disputes as arbitrated."""
-        nonlocal judged_total, b_wins
         started = time.monotonic()
         try:
             verdicts = ensemble_compare(project, lang, pairs, judge,
@@ -642,6 +653,11 @@ def _ensemble_batch_language(project: Project, lang: str, keys: list[str],
                  f"{len(pairs)} pair(s), judge reply unusable: {e}")
             pairs = {}
             verdicts = {}
+        with commit_lock:
+            commit(pairs, verdicts, a_new, label, started)
+
+    def commit(pairs, verdicts, a_new, label, started) -> None:
+        nonlocal judged_total, b_wins
         for key, text in a_new.items():
             locale[key] = {"text": text, "src": text_hash(project.strings[key].text),
                            "model": model_a, "translated_at": utc_now_iso()}
@@ -677,27 +693,53 @@ def _ensemble_batch_language(project: Project, lang: str, keys: list[str],
                  f"c1 {len(arbitrated) - n_c2}, c2 {n_c2} "
                  f"in {time.monotonic() - started:.1f}s")
 
-    ab_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-    try:
-        # --- fresh delta: A and B race on every batch --------------------
-        batches = _batches(keys, project.ollama.batch_size)
-        for n, batch in enumerate(batches, 1):
-            if _cancel.is_set():
-                return result
-            label = f"[{tag}] A+B {n}/{len(batches)}"
+    batches = _batches(keys, project.ollama.batch_size)
+    # Batches run in a window of up to `workers`, each building its few-shot
+    # pool from the verdicts committed when it starts. On a cold start the
+    # anchor batches go first, one by one, so the rest learns their terms.
+    window = min(project.ollama.workers, len(batches)) if _batch_slots else 1
+    serial = len(batches)
+    if window > 1:
+        ok_count = len(classify(project, lang, locale).ok)
+        cold = ok_count < ANCHOR_COLD_RATIO * (len(project.strings) or 1)
+        serial = -(-len(_anchors(project, keys)) // project.ollama.batch_size) \
+            if cold else 0
+    stop = threading.Event()  # a batch failed fatally: start no more
+
+    def ab_batch(n: int, batch: list[str]) -> None:
+        if _cancel.is_set() or stop.is_set():
+            return
+        label = f"[{tag}] A+B {n}/{len(batches)}"
+        with _batch_slots or contextlib.nullcontext():
+            if _cancel.is_set() or stop.is_set():
+                return
             _log(f"{label}: translating {len(batch)} strings (2 models)...")
-            fut_a = ab_pool.submit(translate_batch, project, client_a, lang,
-                                   batch, locale, None, False)
-            fut_b = ab_pool.submit(translate_batch, project, client_b, lang,
-                                   batch, locale, None, False)
-            acc_a, failed_a, _ = fut_a.result()
-            acc_b, _failed_b, _ = fut_b.result()
-            result.failed.update(failed_a)
-            pairs = {k: (acc_a[k], acc_b[k]) for k in acc_a if k in acc_b}
-            judge_and_commit(pairs, acc_a, label=f"[{tag}] C {n}/{len(batches)}")
-            # survivor rule: A's candidate failed validation (e.g. wrong
-            # script), B's passed -> B ships as arbitrated, not a failure
-            b_only = {k: t for k, t in acc_b.items() if k not in acc_a}
+            with commit_lock:
+                snapshot = dict(locale)
+            # one prompt for both: the same strings and the same examples
+            prompt = build_translate_prompt(
+                project, lang, [project.strings[k] for k in batch], snapshot, None)
+            try:
+                fut_b = ab_pool.submit(translate_batch, project, client_b, lang,
+                                       batch, snapshot, None, False, prompt)
+                acc_a, failed_a, _ = translate_batch(project, client_a, lang, batch,
+                                                     snapshot, None, False, prompt)
+                acc_b, _failed_b, _ = fut_b.result()
+                with commit_lock:
+                    result.failed.update(failed_a)
+                pairs = {k: (acc_a[k], acc_b[k]) for k in acc_a if k in acc_b}
+                judge_and_commit(pairs, acc_a, label=f"[{tag}] C {n}/{len(batches)}")
+            except OllamaError as e:
+                with commit_lock:
+                    if result.error is None:
+                        result.error = str(e)
+                stop.set()
+                _log(f"[{tag}] FATAL {e}")
+                return
+        # survivor rule: A's candidate failed validation (e.g. wrong
+        # script), B's passed -> B ships as arbitrated, not a failure
+        b_only = {k: t for k, t in acc_b.items() if k not in acc_a}
+        with commit_lock:
             if b_only:
                 for k, t in b_only.items():
                     locale[k] = {"text": t, "src": text_hash(project.strings[k].text),
@@ -712,8 +754,27 @@ def _ensemble_batch_language(project: Project, lang: str, keys: list[str],
                           {k: (t, "only valid candidate") for k, t in b_only.items()})
                 result.translated += len(b_only)
                 result.arbitrated += len(b_only)
-            _log(f"{label}: +{len(acc_a) + len(b_only)} judged"
-                 + (f", failed {len(result.failed)}" if result.failed else ""))
+            failed_now = len(result.failed)
+        _log(f"{label}: +{len(acc_a) + len(b_only)} judged"
+             + (f", failed {failed_now}" if failed_now else ""))
+
+    # B runs beside A in this pool, one per batch in flight
+    ab_pool = concurrent.futures.ThreadPoolExecutor(max_workers=window)
+    batch_pool = concurrent.futures.ThreadPoolExecutor(max_workers=window) \
+        if window > 1 else None
+    try:
+        # --- fresh delta: A and B race on every batch --------------------
+        for n, batch in enumerate(batches[:serial], 1):
+            ab_batch(n, batch)
+        if batch_pool is not None:
+            futures = [batch_pool.submit(ab_batch, n, batch)
+                       for n, batch in enumerate(batches, 1) if n > serial]
+            for fut in futures:
+                fut.result()
+        if _cancel.is_set():
+            return result
+        if stop.is_set():
+            raise OllamaError(result.error or "a batch failed")
 
         # --- backlog (unverified/suspect/arbitrated from earlier runs) ---
         # Re-resolved ONLY on explicit request (translate --fix-semantic /
@@ -741,10 +802,13 @@ def _ensemble_batch_language(project: Project, lang: str, keys: list[str],
             pairs = {k: (locale[k]["text"], acc_b[k]) for k in acc_b}
             judge_and_commit(pairs, {})
     except OllamaError as e:
-        result.error = str(e)
-        _log(f"[{tag}] FATAL {e}")
+        if not stop.is_set():  # a windowed batch has reported it already
+            result.error = str(e)
+            _log(f"[{tag}] FATAL {e}")
     finally:
         ab_pool.shutdown(wait=False, cancel_futures=True)
+        if batch_pool is not None:
+            batch_pool.shutdown(wait=False, cancel_futures=True)
 
     if result.error is None and (orphans or not keys) and not _cancel.is_set():
         save_locale(project.root, lang, locale, order)  # orphan cleanup

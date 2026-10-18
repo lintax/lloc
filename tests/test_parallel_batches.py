@@ -6,8 +6,12 @@ import time
 import unittest
 from contextlib import redirect_stdout
 
+from unittest import mock
+
+from lloc import engine
 from lloc.engine import run_translate, run_translate_jobs
 from lloc.ollama import OllamaError
+from lloc.semantic import load_semantic
 from lloc.store import load_locale
 
 from .helpers import L10N_TOML, MockTransport, make_project, make_tmpdir
@@ -91,6 +95,111 @@ class TestParallelBatches(unittest.TestCase):
         self.assertLess(len(transport.calls), 12)
         self.assertEqual(len(load_locale(tmp, "ru")), results[0].translated)
         self.assertIn("FATAL", out.getvalue())
+
+
+class TimedEnsemble:
+    """Wraps the ensemble mock transport: holds every call a little and
+    records the interval of each phase-A translate call and its prompt."""
+
+    def __init__(self, fail_key: str | None = None):
+        from .test_ensemble import CloudEnsembleTransport
+        self.inner = CloudEnsembleTransport()
+        self.lock = threading.Lock()
+        self.a_calls: list[tuple[float, float, tuple]] = []
+        self.prompts: dict[tuple, dict[str, str]] = {}
+        self.active_a = 0
+        self.peak_a = 0
+        self.fail_key = fail_key
+
+    def __call__(self, url, payload, timeout):
+        from .test_ensemble import CLOUD_A
+        first = payload["messages"][0]["content"]
+        keys = tuple(payload["format"].get("required", []))
+        is_a = payload["model"] == CLOUD_A and "comparing TWO" not in first
+        if is_a or "comparing TWO" not in first:
+            with self.lock:
+                self.prompts.setdefault(keys, {})[payload["model"]] = first
+        start = time.monotonic()
+        if is_a:
+            with self.lock:
+                self.active_a += 1
+                self.peak_a = max(self.peak_a, self.active_a)
+        try:
+            time.sleep(0.03)
+            if is_a and self.fail_key in keys:
+                raise OllamaError("connection to Ollama lost")
+            return self.inner(url, payload, timeout)
+        finally:
+            if is_a:
+                with self.lock:
+                    self.active_a -= 1
+                    self.a_calls.append((start, time.monotonic(), keys))
+
+
+def ensemble_project(tmp, workers: int):
+    from .test_ensemble import CLOUD_TOML
+    l10n = (CLOUD_TOML.replace("workers = 1", f"workers = {workers}")
+            .replace("batch_size = 3", "batch_size = 1"))
+    return make_project(tmp, l10n=l10n, strings=STRINGS)
+
+
+class TestParallelEnsembleBatches(unittest.TestCase):
+    def run_ensemble(self, p, tr, anchors=()):
+        with mock.patch.object(engine, "_anchors", lambda _p, _k: list(anchors)), \
+                redirect_stdout(io.StringIO()) as out:
+            results = run_translate(p, ["ru"], transport=tr)
+        return results[0], out.getvalue()
+
+    def test_batches_run_in_a_window_without_lost_verdicts(self):
+        tmp = make_tmpdir(self)
+        p = ensemble_project(tmp, workers=4)
+        tr = TimedEnsemble()
+        result, _ = self.run_ensemble(p, tr)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.translated, 12)
+        self.assertGreater(tr.peak_a, 1)
+        self.assertLessEqual(tr.peak_a, 4)
+        # every batch's verdicts survived the parallel writes
+        self.assertEqual(len(load_locale(tmp, "ru")), 12)
+        entries = load_semantic(p, "ru")["entries"]
+        self.assertEqual(len(entries), 12)
+        self.assertTrue(all(e["verdict"] == "ok" for e in entries.values()))
+
+    def test_prompt_is_built_once_for_a_and_b(self):
+        from .test_ensemble import CLOUD_A, CLOUD_B
+        tr = TimedEnsemble()
+        with mock.patch.object(engine, "build_translate_prompt",
+                               wraps=engine.build_translate_prompt) as build:
+            self.run_ensemble(ensemble_project(make_tmpdir(self), workers=4), tr)
+        self.assertEqual(build.call_count, 12)  # one per batch, not two
+        pairs = [v for v in tr.prompts.values() if CLOUD_A in v and CLOUD_B in v]
+        self.assertEqual(len(pairs), 12)
+        for v in pairs:
+            self.assertEqual(v[CLOUD_A], v[CLOUD_B])
+
+    def test_cold_start_runs_anchor_batches_one_by_one(self):
+        tr = TimedEnsemble()
+        p = ensemble_project(make_tmpdir(self), workers=4)
+        self.run_ensemble(p, tr, anchors=["s0", "s1"])
+        calls = sorted(tr.a_calls)
+        self.assertEqual([c[2] for c in calls[:2]], [("s0",), ("s1",)])
+        # the second anchor starts after the first ends, the window after both
+        self.assertLessEqual(calls[0][1], calls[1][0])
+        self.assertLessEqual(calls[1][1], min(c[0] for c in calls[2:]))
+        self.assertGreater(tr.peak_a, 1)
+
+    def test_fatal_error_keeps_judged_batches_and_starts_no_more(self):
+        tmp = make_tmpdir(self)
+        p = ensemble_project(tmp, workers=2)
+        tr = TimedEnsemble(fail_key="s3")
+        result, out = self.run_ensemble(p, tr)
+        self.assertIn("connection to Ollama lost", result.error)
+        self.assertEqual(out.count("FATAL"), 1)
+        self.assertLess(len(tr.a_calls), 12)
+        # nothing unjudged: every written key has its verdict
+        written = set(load_locale(tmp, "ru"))
+        self.assertNotIn("s3", written)
+        self.assertEqual(written, set(load_semantic(p, "ru")["entries"]))
 
 
 if __name__ == "__main__":

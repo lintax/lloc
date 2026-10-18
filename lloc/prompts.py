@@ -1,6 +1,7 @@
 """Prompt templates and few-shot example selection."""
 from __future__ import annotations
 
+import functools
 import math
 import re
 import threading
@@ -62,8 +63,10 @@ def strings_block(entries: list[StringEntry]) -> str:
     return "\n".join(lines).rstrip()
 
 
-def _words(text: str) -> set[str]:
-    return {w.lower() for w in _WORD_RE.findall(text)}
+@functools.lru_cache(maxsize=1 << 18)
+def _words(text: str) -> frozenset[str]:
+    """Cached: few-shot selection scores the same pool on every batch."""
+    return frozenset(w.lower() for w in _WORD_RE.findall(text))
 
 
 _TRUST_MANUAL = 2000    # human fixes: golden examples
