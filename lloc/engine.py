@@ -20,6 +20,10 @@ from .validate import check_translation
 _print_lock = threading.Lock()
 _model_note_shown = False
 _cancel = threading.Event()  # set on Ctrl+C: workers stop at the next batch boundary
+# Requests in flight across the whole run, set by run_translate_jobs: a module
+# whose batches are independent runs them in parallel, and all modules share
+# these `workers` slots.
+_batch_slots: threading.BoundedSemaphore | None = None
 
 HEARTBEAT_SEC = 30.0
 
@@ -274,29 +278,46 @@ def translate_language(
 
     tag = f"{project.module}:{lang}" if project.module else lang
     batches = _batches(keys, project.ollama.batch_size)
-    for i, batch in enumerate(batches, 1):
-        if _cancel.is_set():  # interrupted: completed batches are on disk already
-            return result
+    lock = threading.Lock()  # guards locale, result and the locale file
+    stop = threading.Event()  # a batch failed fatally: start no more
+    # Without inline QA a batch's results are unverified and never become
+    # few-shot examples (select_examples is trusted-only), so the batches do
+    # not depend on each other and may run in parallel.
+    parallel = not inline_qa and _batch_slots is not None and len(batches) > 1
+
+    def run_batch(i: int, batch: list[str]) -> None:
+        if _cancel.is_set() or stop.is_set():
+            return  # interrupted: completed batches are on disk already
         label = f"[{tag}] batch {i}/{len(batches)}"
-        _log(f"{label}: translating {len(batch)} strings...")
-        _note_model_load(model_name)
-        started = time.monotonic()
-        try:
-            with _heartbeat(label):
-                accepted, failed, arbitrated = translate_batch(
-                    project, client, lang, batch, locale, semantic=inline_qa)
-        except OllamaError as e:
-            result.error = str(e)
-            _log(f"{label}: FATAL {e}")
-            break
+        slot = _batch_slots or contextlib.nullcontext()
+        with slot:
+            if _cancel.is_set() or stop.is_set():
+                return
+            _log(f"{label}: translating {len(batch)} strings...")
+            _note_model_load(model_name)
+            started = time.monotonic()
+            with lock:
+                snapshot = dict(locale) if parallel else locale
+            try:
+                with _heartbeat(label):
+                    accepted, failed, arbitrated = translate_batch(
+                        project, client, lang, batch, snapshot, semantic=inline_qa)
+            except OllamaError as e:
+                with lock:
+                    if result.error is None:
+                        result.error = str(e)
+                stop.set()
+                _log(f"{label}: FATAL {e}")
+                return
         elapsed = time.monotonic() - started
-        result.arbitrated += len(arbitrated)
-        for key, text in accepted.items():
-            locale[key] = {"text": text, "src": text_hash(project.strings[key].text),
-                           "model": model_name, "translated_at": utc_now_iso()}
-        result.translated += len(accepted)
-        result.failed.update(failed)
-        save_locale(project.root, lang, locale, order)  # progress survives interruption
+        with lock:
+            result.arbitrated += len(arbitrated)
+            for key, text in accepted.items():
+                locale[key] = {"text": text, "src": text_hash(project.strings[key].text),
+                               "model": model_name, "translated_at": utc_now_iso()}
+            result.translated += len(accepted)
+            result.failed.update(failed)
+            save_locale(project.root, lang, locale, order)  # progress survives interruption
         if inline_qa and accepted:
             from .semantic import mark_arbitrated, mark_ok
             verified = {k: t for k, t in accepted.items() if k not in arbitrated}
@@ -308,6 +329,23 @@ def translate_language(
                  + (f" ({reason})" if reason else ""))
         _log(f"{label}: +{len(accepted)} in {elapsed:.1f}s"
              + (f", failed {len(failed)}" if failed else ""))
+
+    if parallel:
+        pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(project.ollama.workers, len(batches)))
+        try:
+            for fut in [pool.submit(run_batch, i, b) for i, b in enumerate(batches, 1)]:
+                fut.result()
+        finally:
+            # on Ctrl+C the queued batches see _cancel and return at once
+            pool.shutdown(wait=False, cancel_futures=True)
+    else:
+        for i, batch in enumerate(batches, 1):
+            run_batch(i, batch)
+            if _cancel.is_set() or stop.is_set():
+                break
+    if _cancel.is_set():
+        return result
 
     if result.error is None and (orphans or not batches):
         save_locale(project.root, lang, locale, order)  # drop orphans even with empty delta
@@ -978,9 +1016,10 @@ def run_translate_jobs(
     workspace mode the pool spans all modules of the run.
     Jobs are grouped by effective model (order_jobs) to minimize model swaps.
     Results come back in the (reordered) job order."""
-    global _model_note_shown
+    global _model_note_shown, _batch_slots
     _model_note_shown = False  # fresh note per run
     _cancel.clear()
+    _batch_slots = threading.BoundedSemaphore(workers) if workers > 1 else None
     if any(p.ensemble for p, _l, _k in jobs):
         try:
             return _ensemble_run(jobs, workers, transport,

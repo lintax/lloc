@@ -195,25 +195,64 @@ def get_terms(project: Project) -> dict[str, list[str]]:
     return cache
 
 
-def text_terms(project: Project, text: str) -> set[str]:
-    gwords = _glossary_words(project)
+class _TermIndex:
+    """get_terms() indexed for text_terms: single-word terms in a set,
+    two-word terms by their (first, second) word. A token matches a term word
+    that equals it or is one of its prefixes of PREFIX+ letters (_match), so a
+    lookup tries those few prefixes instead of scanning every term."""
+
+    def __init__(self, project: Project):
+        self.gwords = _glossary_words(project)
+        self.single: set[str] = set()
+        self.pairs: dict[tuple[str, str], list[str]] = {}
+        self.firsts: set[str] = set()
+        self.seconds: set[str] = set()
+        for term in get_terms(project):
+            parts = term.split(" ")
+            if len(parts) == 1:
+                self.single.add(parts[0])
+            else:
+                self.pairs.setdefault((parts[0], parts[1]), []).append(term)
+                self.firsts.add(parts[0])
+                self.seconds.add(parts[1])
+        self.cache: dict[str, frozenset[str]] = {}
+
+    def reps(self, tok: str, words: set[str]) -> list[str]:
+        """Term words in `words` that `tok` matches; a glossary word only
+        matches itself, not a shorter term it extends."""
+        if tok in self.gwords:
+            return [tok] if tok in words else []
+        out = [tok] if tok in words else []
+        out += [tok[:n] for n in range(PREFIX, len(tok)) if tok[:n] in words]
+        return out
+
+
+def _term_index(project: Project) -> _TermIndex:
+    index = getattr(project, "_term_index", None)
+    if index is None:
+        index = _TermIndex(project)
+        project._term_index = index
+    return index
+
+
+def text_terms(project: Project, text: str) -> frozenset[str]:
+    """The terms `text` contains. Cached per text: few-shot selection asks for
+    the same pool of translated strings on every batch."""
+    index = _term_index(project)
+    found = index.cache.get(text)
+    if found is not None:
+        return found
     toks = _tokens(text)
-
-    def match(tok: str, rep: str) -> bool:
-        # a glossary word only matches itself, not a shorter term it extends
-        return _match(tok, rep) and (tok not in gwords or tok == rep)
-
-    found = set()
-    for term in get_terms(project):
-        parts = term.split(" ")
-        if len(parts) == 1:
-            if any(match(t, parts[0]) for t in toks):
-                found.add(term)
-        else:
-            for a, b in zip(toks, toks[1:]):
-                if match(a, parts[0]) and match(b, parts[1]):
-                    found.add(term)
-                    break
+    terms: set[str] = set()
+    for tok in toks:
+        terms.update(index.reps(tok, index.single))
+    if index.pairs:
+        for a, b in zip(toks, toks[1:]):
+            for ra in index.reps(a, index.firsts):
+                for rb in index.reps(b, index.seconds):
+                    terms.update(index.pairs.get((ra, rb), ()))
+    found = frozenset(terms)
+    index.cache[text] = found
     return found
 
 
