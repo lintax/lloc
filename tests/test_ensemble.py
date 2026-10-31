@@ -409,6 +409,24 @@ class TestConcurrentBatchEnsemble(unittest.TestCase):
         self.assertIn("back", kinds)
         self.assertRegex(out.getvalue(), r"C \d+/\d+: agree \d+, c1 \d+, c2 \d+")
 
+    def test_deleted_string_only_cleans_up_without_calls(self):
+        # nothing to translate, a string deleted since: the language is run for the
+        # cleanup alone; no pool of zero workers, no request, the orphan gone
+        tmp = make_tmpdir(self)
+        # (several workers: the window of batches is made of them)
+        project = make_project(tmp, l10n=CLOUD_TOML.replace("workers = 1", "workers = 4"))
+        tr = CloudEnsembleTransport()
+        self._run(project, tr)
+        locale = load_locale(tmp, "ru")
+        locale["gone_key"] = {"text": "старое", "src": "1111111111111111"}
+        save_locale(tmp, "ru", locale, list(project.strings) + ["gone_key"])
+        self.assertIn("gone_key", load_locale(tmp, "ru"))
+        tr.events.clear()
+        results, _out = self._run(project, tr)
+        self.assertIsNone(results[0].error)
+        self.assertEqual(tr.events, [])
+        self.assertNotIn("gone_key", load_locale(tmp, "ru"))
+
     def test_interrupt_writes_no_unjudged_pairs(self):
         tmp = make_tmpdir(self)
         toml = CLOUD_TOML.replace("batch_size = 3", "batch_size = 1")

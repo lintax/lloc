@@ -753,7 +753,9 @@ def _ensemble_batch_language(project: Project, lang: str, keys: list[str],
     # Batches run in a window of up to `workers`, each building its few-shot
     # pool from the verdicts committed when it starts. On a cold start the
     # anchor batches go first, one by one, so the rest learns their terms.
-    window = min(project.ollama.workers, len(batches)) if _batch_slots else 1
+    # (at least one: a language with nothing to translate is here only to drop
+    # the strings deleted since, and the pools below are made either way)
+    window = max(1, min(project.ollama.workers, len(batches))) if _batch_slots else 1
     serial = len(batches)
     if window > 1:
         ok_count = len(classify(project, lang, locale).ok)
